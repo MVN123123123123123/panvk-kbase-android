@@ -22,7 +22,7 @@ data class Driver(
     val sha256: String = "",
     val driverVersion: String = ""
 ) {
-    /** "PanVK Kbase - beta.9 (...)" style one-liner for dropdowns and the launch card. */
+    /** "Mesa PanVK — 26.3.0-devel (git-0123456789)" style one-liner for dropdowns and the launch card. */
     val label: String get() = if (version.isEmpty()) name else "$name — $version"
 }
 
@@ -233,6 +233,8 @@ object DriverManager {
                 throw IllegalArgumentException("Library file '$libraryName' specified in meta.json was not found in archive")
             }
 
+            if (DriverUpdate.isGlibcSo(libFile)) throw IllegalArgumentException(DriverUpdate.GLIBC_MSG)
+
             val rawName = metaJson.optString("name", "driver")
             var sanitized = rawName.replace(Regex("[^A-Za-z0-9._-]"), "_").ifEmpty { "driver" }
             if (sanitized == "bundled" || sanitized == bundledId(context) || sanitized == "."|| sanitized == ".." || sanitized.startsWith(".")) {
@@ -298,7 +300,7 @@ object DriverManager {
             so.copyTo(File(stage, "libvulkan_panfrost.so"), overwrite = true)
             File(stage, "meta.json").writeText(
                 JSONObject()
-                    .put("name", "PanVK Kbase — ${r.label}")
+                    .put("name", "Mesa PanVK")
                     .put("packageVersion", r.version)
                     .put("description", "Downloaded from GitHub release ${r.tag} (${DriverUpdate.ASSET}), SHA-256 and ELF verified.")
                     .put("author", "abhay-byte")

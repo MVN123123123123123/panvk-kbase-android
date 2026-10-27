@@ -2,6 +2,32 @@
 
 Snapshot: 2026-10-08. beta.17 is released (Mesa 5a07217f + csf-v11 up to 121, plus android/014 and jm-v9). beta.18-rc1 was released on 2026-10-07 as a prerelease (series up to 180); PanProbe 37/37 on G610, G710, G615, G715, G720 and G925. beta.18-rc2 (rc1 plus csf-v11/181 `robustImageAccess2` on v10+) will be released soon. Device: Mali G615 (PAN_ARCH 11, gpu_id 0xb8a31030). Fallout 4 hangs before the driver loads; the root cause is two bugs in the bundled Proton arm64ec, not the driver (worklogs/driver-remaining/fo4-hang-before-driver.md).
 
+Update 2026-10-16: 0.1.0-rc3 (2026-10-12) and rc3-lowmem (2026-10-13) are released as prereleases. Work for Mali v9 through v13 is done: PanProbe passes 38/38 on v9, v10, v11, v12 and v13 devices in the cloud uploads. The cloud log review for both builds, the refreshed "what's left" list, and the new v14 and v7 sections are at the end of this file ("RC3 and RC3-lowmem cloud log findings", "Mali v14 support", "Mali v7 (Bifrost) support").
+
+Test devices (2026-10-16): the Mali devices on Samsung RTL, Firebase Test Lab and our own, by arch, and the gaps are in [TEST_DEVICES.md](TEST_DEVICES.md).
+
+## Status 2026-10-16 (goal loop)
+
+Done/built, not device-tested:
+- [x] App items 11-16: glibc refuse, vendor ICD flag, swapchain no-surface SKIP, depth_bounds best-of-5, Bifrost message, Firebase Game Loop + `scripts/firebase-panprobe.sh`.
+- [x] jm-v7 001-004: variant, gate, JIT skip, stride 64.
+- [x] API 29 build (no `call_once` shim needed).
+- [x] C ION fallback: jm-v7 005. VERIFIED on S20+ G77 (see Verified).
+- [x] D: patch csf-v11/186 (MTK SLC MEM_IMPORT 40-byte layout retry) built at `/var/tmp/panvk/dist-v14imp` (BuildID `acdb9594`), untested. Needs G1-Ultra tester.
+
+Analysed, no code change:
+- [x] E (user-exit artefact).
+- [x] F (cause unknown, needs G57 rerun).
+
+Open:
+- [ ] A: not one bug. Tiler heap OOM; VT progress timeout; CS_UNRECOVERABLE on G610; RE7/SMB3D are MMU faults.
+- [ ] B: stale pointer hypothesis. Needs a real Mali CSF device.
+- [ ] D: needs G1-Ultra run of 186 (built, untested).- [ ] Items 18-21: need devices.
+
+Verified:
+- [x] S20+ G77 rc3-lowmem 38/38.
+- [x] C on S20+ G77 (kernel 4.19, ION path): 32-bit D3D9 cube passes, no placed-map error. API 29 build + jm-v7 001-005: no regression on v9 (38/38).
+
 Launcher scope correction (2026-10-02): ARM64EC DX8/9/10/11 clear + source
 readback + X11 Present passes, including actual app path-only launches. Evidence:
 `apps/panvk-launcher/tests/results/arm64ec-matrix/README.md` and sibling
@@ -229,11 +255,25 @@ Series: rc1 plus the patches below. To be released soon.
 
 ## What's left for DXVK (driver)
 
+### Refreshed list (2026-10-16, after the rc3 and rc3-lowmem cloud logs)
+
+The numbered items below are the history. This is the current order of work. Evidence for each line is in "RC3 and RC3-lowmem cloud log findings" at the end of this file.
+
+1. **CSF DEVICE_LOST in real games (v10-v13).** 14 PanPlay sessions on rc3 lost the device after a CS subqueue timeout with `stream progress 0x0` and `error 0x0` (Stray, Mafia II, Dead Space 3, Castlevania Lords of Shadow 2, Dead Cells, RE7, Super Meat Boy 3D, Rubinite), on G610, G615, G715, G720 and G925. Two more (Dark Souls on G615 MC6) were a CSF group fatal error with exception 0xC1 (an MMU translation fault). This is now the most common driver failure and the main blocker for a final release.
+2. **v9 JM placed maps for 32-bit (WOW64) games.** On v9 the driver refuses placed maps of BOs that are not dma-bufs (`kbase: placed map of a non-dma-buf BO is not supported`), so DXVK gets `VK_ERROR_MEMORY_MAP_FAILED` in every x86 game (RE6, RE Revelations, Tomb Raider, MXGP, the x86 D3D8 cube) on G57, G77 and G78. x64 and ARM64EC games are not affected. The CSF fix (091, dma-heap placed maps) needs a JM equivalent.
+3. **v14 (G1-Ultra) dma-buf import.** Memory allocation works since the ALLOC_EX fallback (PanProbe 37/38), but `KBASE_IOCTL_MEM_IMPORT` also returns ENOTTY. That breaks the Android swapchain and all 32-bit DXVK games. See "Mali v14 support".
+4. **v7 Bifrost bring-up**, if wanted: gpu_id variant matching, the `PAN_I_WANT_A_BROKEN_VULKAN_DRIVER` gate, `MEM_JIT_INIT` failing, and a full feature gap. See "Mali v7 (Bifrost) support".
+5. **Android 10 (API 29) devices cannot load the ICD.** The .so is built with the android35 toolchain and imports `call_once` (bionic API 30+), so `dlopen` fails on Android 10 (Redmi Note 8 Pro, Huawei P40, vivo 1806). Either build with an API 29 target and avoid `call_once`, or state "Android 11+" in the apps and release notes.
+6. **v9 `large_draw` query DEVICE_LOST** on one G57 MC2 (Infinix X6711, rc3, 2 of 2 runs): `points_indirect` passes, then `GetQueryPoolResults r=-4`. Other G57 MC2 devices pass 38/38 on lowmem. Ask for a lowmem rerun on that phone before debugging. Also one v9 G57 MC1 game session hit `kbase: JM atom N failed: event=0x4`.
+7. **X11 surface re-creation returns `VK_ERROR_OUT_OF_HOST_MEMORY`.** 11 PanPlay sessions (mostly v9 G68/G57, once each on v10-v13): after `VK_ERROR_OUT_OF_DATE_KHR`, DXVK cannot get surface capabilities (`SURFACE_LOST`) and re-creating the Xlib surface fails with OOHM. All 11 ended as user exits, so this is probably the window going away at exit or on backgrounding, but the error code is wrong and Just Cause 2 hit it twice on G68. Check the X11 WSI surface error mapping.
+8. **App-side fixes (PanProbe/PanPlay):** reject a glibc .so on import with a clear message (9 PanProbe reports imported the glibc build and failed on `libdrm.so.2`); detect when the test processes fall back to the vendor ICD (two G615 lowmem runs ran the tests on the vendor driver while the manifest said "Bundled PanVK"); make `swapchain_lifecycle` report "no surface" / `ANativeWindow_getWidth -19` as SKIP or a harness error, not a driver FAIL; the `depth_bounds` perf case `I_perf_dyn_off` (ratio 2.64 on one G720 MC8) is timing-sensitive and should not fail the suite on its own.
+9. Older open items below that still apply: 11 (asynchronous submission), 24 (fan `gl_BaseInstance`), 25 (small follow-ups), 26 (series-order fragility), 29 (v13 D3D8/D3D9 frame rate), 38 (denorm independence), 39 (`maxFragmentDualSrcAttachments`), and the CTS failures under "Open problems".
+
 3. DXVK FL11_1 re-check: **done (static + existing G615 logs).** DXVK 3.1.1 needs `logicOp` + `vertexPipelineStoresAndAtomics` for 11_1; both are on for v10-v12. G615 launcher logs (2026-10-03) already show `Maximum supported feature level: D3D_FEATURE_LEVEL_11_1`; the FL 11_0 in the done table predates 078. Expected: v10 11_1 (after 108), v11/v12 11_1, v13/v14 11_0 (VPSA is drirc opt-in). 12_0 is blocked by sparse/tiled resources (NO-GO on kbase), 12_1 by fragment shader interlock. [Worklog](../driver-remaining/fl11_1-recheck.md).
   - Tester data (2026-10-06) confirms it: stock G615 cubes get FL11_1, v13 Immortalis-G925 cubes and Core Keeper get FL11_0 (`vertexPipelineStoresAndAtomics : 0`). Open question in item 23.
 4. `shaderOutputViewportIndex`: v12+ bit on with run splitting since 109 (untested on hardware; see item 16). **FS `gl_PrimitiveID` across viewport runs: csf-v11/115, released in beta.17, G615 PanProbe 36/36.** The run builder packs the per-draw primitive ID into index bits 16+, and the passthrough VS outputs it. Limits: IDs wrap past 65535, polygon-mode LINE/POINT gets 0, GPU-chunked draws restart the ID per chunk. [Worklog](../driver-remaining/115-viewport-run-primitive-id.md).
 5. `depthBounds`: v12+ bit on since 109 (untested on hardware; see item 16). **csf-v11/116, released in beta.17, G615 PanProbe 36/36.** Review: the FPK/coverage mismatch needs G615 proof (item 21). A lowered FS keeps the app's FPK, coverage and early-ZS LUT while the test is off (dynamic enable, DXVK). With EarlyFragmentTests and the test on, the ZS update moves after the FS, so the test reads the stored depth. Limits: an EFT FS that also discards, writes a mask or uses a2c keeps the 092 behaviour; side effects of out-of-bounds EFT fragments still run. [Worklog](../driver-remaining/116-depth-bounds-fpk.md).
-6. Prerast limits: **csf-v11/112, released in beta.17, G615 PanProbe 36/36.** Direct fans over the cap are split (hub + window, exact prim IDs). Fan and tess instance grids are capped at 2048. Chunked draws skipped by conditional rendering no longer lower or count PG. The rasterizer-discard and GS-primitive-ID items were checked: they are not gaps (XFB/PG/pstats run on the compute side, prim IDs are exact), and they are now tested. Still open: indexed fans with restart and indirect fans over the cap; CPU instance splits shift `gl_BaseInstance`/divisors (pre-existing). [Worklog](../driver-remaining/112-prerast-gaps.md).
+6. Prerast limits: **csf-v11/112, released in beta.17, G615 PanProbe 36/36.** Direct fans over the cap are split (hub + window, exact prim IDs). Fan and tess instance grids are capped at 2048. Chunked draws skipped by conditional rendering no longer lower or count PG. The rasterizer-discard and GS-primitive-ID items were checked: they are not gaps (XFB/PG/pstats run on the compute side, prim IDs are exact), and they are now tested. Indexed fans with restart and indirect fans over the cap: csf-v11/195 (indirect fans clamped to the arena, default on) and 196 (fans in the GPU chunk loop, opt-in `PANVK_FAN_CHUNKS=1`), build-only, see item 24. CPU instance splits no longer shift `gl_BaseInstance`/divisors: csf-v11/191, build-only, not device-tested. [Worklog](../driver-remaining/112-prerast-gaps.md).
 7. `variableMultisampleRate`: **csf-v11/114, released in beta.17, G615 PanProbe 36/36.** Attachment-less secondaries cut their CS streams per sample count change. The primary splits its render context between the segments, so the secondary does no context work (the 086 blockers do not apply). An attachment-less pass that suspends ends its context, and the resumed part starts a new one. The unsafe 086 stays removed. [Worklog](../driver-remaining/114-secondary-vmr-segments.md).
 8. Exact tessellation primitives-generated count: **already exact (113 check, no patch; nothing to ship).** count/vpp per aligned range, conditional skip zeroed by 087. APK `large_draw` now checks PG for isoline, triangle and instanced tess and for the cond-skip case (untested on G615). [Worklog](../driver-remaining/113-tess-pg-count.md).
 9. X11 present: DRI3 / MIT-SHM path instead of CPU `PutImage`; FIFO is not vsync-paced. Present fence wait moved off the submit thread in 106. **Status: csf-v11/117, released in beta.17. Launcher review findings in item 22.** ShmPutImage from memfd segments via MIT-SHM 1.2 AttachFd (falls back to PutImage), sw FIFO paced to `MESA_VK_X11_SW_REFRESH_HZ` (launcher sets display max refresh). Launcher X server gains MIT-SHM 1.2 AttachFd. DRI3 not done (builtin server has none). Host Xwayland: ShmPutImage 2.4-2.5x PutImage at 720p, 1.5-1.7x at 1080p. See `worklogs/driver-remaining/117-x11-shm-present.md`.
@@ -241,8 +281,9 @@ Series: rc1 plus the patches below. To be released soon.
   - They use only the kbase ABI, cs_builder ops whose encodings match in v12-v14 genxml, and NIR.
   - Tessellation, GS and conditional rendering are exposed on v10-v14.
   - [Worklog](../driver-remaining/111-event-cleanups.md).
-11. **Next driver task: asynchronous kbase queue submission. STATUS: NOT STARTED.**
-  - Beta.15/16 removed the CPU waits around submit (102-107); NFS is now bound by the game main thread / wineserver IPC. The ring kick already returns immediately; asynchronous submission work remains to be scoped.
+11. **Next driver task: asynchronous kbase queue submission. STATUS: SCOPED; csf-v11/192 written (build-only, not device-tested).**
+  - Beta.15/16 removed the CPU waits around submit (102-107); NFS is now bound by the game main thread / wineserver IPC. The ring kick already returns immediately.
+  - 2026-10-16 scope: a full submit thread is not worth it now (DXVK already submits from `dxvk-submit`, 107 showed fps unchanged when submit blocking fell, Mesa THREADED mode with emulated timelines would block present on the thread). The largest synchronous cost left was `KBASE_IOCTL_CS_TILER_HEAP_TERM` (1.5 ms p50, 23 ms max, ~31/s); `csf-v11/192` moves it to the `panvk_heap` thread (`PANVK_KBASE_ASYNC_HEAP_TERM=0` disables). BuildID `cf31393d`. Plan for a submit thread if a profile ever needs it: [worklog](../driver-remaining/192-async-submit.md).
 12. **Mali v9 (Valhall JM, G57/G68/G77/G78): experimental since beta.14, finish to PanProbe 17/17.**
   - G57 MC2 tablet (kbase JM uAPI 11.38, measured by the beta.17 candidate; gpu_id 0x90930010; `TEXTURE_FEATURES[0] = 0xf7fe03fe`, BC1-BC3 native): PanProbe 1/17 on beta.14/15/16; beta.17 candidate 2/17 real (adds `swapchain_lifecycle` via `cpu-linear-probe`; `vmr_secondary` only skips, item 27). DXVK rejects Vulkan 1.1; needs Vulkan 1.3 + GS, multiViewport, fillModeNonSolid and BC. Details: [docs/universal/v9-jm/README.md](../../docs/universal/v9-jm/README.md); earlier tests: `worklogs/driver-remaining/101-v9-jm-test-driver.md`, `validation/v9-jm/` (CTS smoke 4/6, mapping 102/102, basic sync 21 pass / 8 NotSupported, simple draw 4/4).
   - JM replay: DATA_INVALID_FAULT (event 0x58) in `gpu_prerast_slice` "replay" (same command buffer submitted twice). Suspected GPU-written malloc-job payload not restored; 4-8 h diagnosis + 1-2 days fix. VMR secondaries count only sample 0, not samples 1-3; update `fb.nr_samples` / `evaluate_per_sample` (1-2 days + mixed-rate validation).
@@ -259,6 +300,7 @@ New driver gaps from tester data ([docs/universal/README.md](../../docs/universa
 14. **BC emulation decision (v9/v10).** Native BC1 reported by kbase disables emulation, leaving `textureCompressionBC=false`; DXVK rejects G610. The partial native mask is inferred (uploads omit `TEXTURE_FEATURES`).
   - `src/panfrost/vulkan/panvk_physical_device.c:1815`, `:1837`; `src/panfrost/vulkan/panvk_vX_physical_device.c:294`, `:338`. Emulate unless full native BC mask is present; effort 4-8 h incl. validation. [Index](../../docs/universal/README.md).
   - **Status: released in beta.17; proven on G610 (37/37 on rc1).** `patches/csf-v11/108` emulates unless all ten BC formats are native. G57 deqp: `textureCompressionBC` 0 -> 1, format_properties.bc* 16/16. v10 G610 needs tester rerun. v9 compressed-texture image checks fail for native ETC2/ASTC too (separate issue). [Worklog](../driver-remaining/108-bc-emulation-decision.md).
+  - 2026-10-16 (`jm-v9/031`, build-only, not device-tested): the JM `CmdPipelineBarrier2` now calls `cmd_bc_decode_zero_initialized()` on v9 too (csf-v11/040 only called it from the CSF barrier), so a BC image leaving `ZERO_INITIALIZED` is decoded instead of sampling the zeroed decoded plane. v9 uses the same path as v6/v7: `panvk_bc_emul_enabled()` is arch-independent, `bc_gfx` needs arch >= 10 (v9 decodes by compute), and `VK_EXT_zero_initialize_device_memory` plus the layout are exposed on every arch. 031 is not gated by arch, so `jm-v7-wip/0013` (v6/v7 only) is redundant and conflicts with it; drop 0013.
   - 2026-10-06: the beta.17 candidate measured the G57 mask, `TEXTURE_FEATURES[0] = 0xf7fe03fe` (BC1-BC3 native, BC4-BC7 not), which proves the partial-native inference. A third G610 device now hits this: vivo V2284A (MT6896Z/CZA, 5.10.233, `5b799ebb`, beta.15), user D3D game exit 3 after DXVK skips the adapter.
 15. **Vendor-neutral gralloc mapper.** Hard-coded MediaTek stable-C mapper5 causes `vkCreateSwapchainKHR` / AHB import `VK_ERROR_INVALID_EXTERNAL_HANDLE` on stock ROMs and vendor API < 34; Pixel/Tensor reports are consistent with this gap (cause not yet proven).
   - `src/util/u_gralloc/u_gralloc_fallback.c:83`, `:427`; `patches/android/013-vendor-mapper-metadata.patch`; `src/vulkan/runtime/vk_android.c:152`. Vendor-neutral discovery + mapper4: 24-48 h; quick configurable mapper names: 4-8 h (does not cover mapper4-only vendors). [Index](../../docs/universal/README.md).
@@ -305,20 +347,21 @@ New driver gaps from tester data ([docs/universal/README.md](../../docs/universa
     - Tester check (G1-Ultra PanPlay/PanProbe logcat): `kbase: CSF driver, uAPI version X.Y`, `kbase: KBASE_IOCTL_MEM_ALLOC_EX failed: ... trying KBASE_IOCTL_MEM_ALLOC`, `kbase: mem_alloc via ALLOC`, then the queue_group_create/tiler_heap_init layout lines.
     - If group create or heap init also fail with ENOTTY, the kernel's CSF uAPI differs more widely; send the version line.
     - No new v14 data on 2026-10-06.
+    - **2026-10-16: the fallback works on hardware.** rc3 and rc3-lowmem uploads from four G1-Ultra phones (CSF uAPI 1.38) log `KBASE_IOCTL_MEM_ALLOC_EX failed ... trying KBASE_IOCTL_MEM_ALLOC`, `mem_alloc via ALLOC`, `queue_group_create layout=112 bytes`, `tiler_heap_init layout=16 bytes`, and PanProbe passes 37/38. The new blocker is `KBASE_IOCTL_MEM_IMPORT` ENOTTY; see "Mali v14 support" at the end of this file.
 
 beta.17 review follow-ups (2026-10-06; details in the review table above). None blocks the release; each needs a check or a small fix.
 
 21. **116 FPK/coverage mismatch.** Status: FIXED by the beta.17b rework of 116 (the db_off FPK/coverage overrides are dropped; the DCD uses the lowered FS's real writes_coverage). With the depth bounds test off, the lowered FS still writes SampleMask while the DCD says no coverage write and allows FPK. Prove on the G615 (`depth_bounds` H/I, CTS `pipeline.*depth_bounds*`) before release; if FPK drops samples, clear FPK when the lowered FS writes the mask.
 22. **117 launcher MIT-SHM hardening (app side, pre-existing, now reachable).** Status: PARTLY FIXED. ShmPutImage now reads `offset` and bounds-checks it (commit ed5f662). Still open: AttachFd replaces an existing xid without an owner check (`SHMSegmentManager.java:59`). The ShmPutImage handler ignores `offset` and does not bounds-check the source rect against the segment size; AttachFd detaches an existing xid without an owner check. Negative-origin damage rects are skipped, not clipped (driver side, minor). Also split the unrelated process-kill / `wineserver -w` changes out of the `Containers.kt` diff before committing.
 23. **VPSA / FL11_1 on v13 and v14 (open question).** Status: RESOLVED. csf-v11/119 defaults VPSA on for v10-v14 since beta.17; with 130 the G925 passes PanProbe 37/37. `vertexPipelineStoresAndAtomics` is a drirc opt-in on v13+ (`panvk_vX_physical_device.c:345-348` in wt-beta17), so DXVK caps v13 at FL11_0, confirmed by tester data. A third-party driver on the same G925 exposes VPSA and gets FL11_1, but that does not prove it is correct through PanVK's v13 IDVS path. Next: a v13 PanProbe `vertex_stores` run plus CTS vertex atomics with `enable_vertex_pipeline_stores_atomics`, then decide the default. v14 is expected to behave the same.
-24. **112 `gl_BaseInstance` on fan instance splits.** CPU instance splits (> 2048 instances) and per-instance fan windows shift `gl_BaseInstance` (pre-existing for other topologies, now also for fans). Indexed fans with primitive restart and indirect fans over the arena are still unhandled.
-25. **Small follow-ups.** Status: jm-v9/004 log level FIXED (warning unless it is the expected case). Still open: 114 u_trace, android/014 HIDL mapper4 backend. 114: u_trace of earlier secondary segments is not appended. jm-v9/004: EPERM/EINVAL from EXEC_INIT is now only `mesa_logd`, which hides real failures (log at warning once when it is not the "zone exists" case). android/014: the HIDL mapper4 raw-vtable backend is unreachable from app namespaces and carries ABI risk (drop it or keep it for standalone tools only).
-26. **Series-order fragility.** 110 shifted offsets so that a jm-v9/001 hunk (atoms mutex destroy) applied into the CSF csif error path; jm-v9/005 moves it back. `git apply` accepts offsets silently, so `apply-patches.sh` should fail on any offset, not only on fuzz.
+24. **112 `gl_BaseInstance` on fan instance splits.** Status: `gl_BaseInstance`/divisors FIXED by csf-v11/191 (build-only, not device-tested): CPU split chunks (instance ranges, per-instance vertex windows, fan windows) keep the API firstInstance and hand their instance offset to the lowered VS as `chunk_instance`, like the GPU chunk loop; an IDVS fallback chunk still shifts the base (old behaviour). APK `large_draw` gains `base_inst_*` cases (gl_BaseInstance + divisor-3 attribute), not run. Fans over the arena: csf-v11/195 (default on) clamps an indirect fan lowered in one pass to the arena, so the triangles past it are dropped instead of drawn from stale records. csf-v11/196 (opt-in, `PANVK_FAN_CHUNKS=1`, Android `debug.mesa.panvk.fan.chunks=1`, default off) runs indirect fans and direct indexed restart fans over the arena in the GPU chunk loop (`panlib_fan_chunk_step`/`_fill`: hub + window chunks, windows end at the last restart, exact primitive counts, 2048 instance cap). Both build-only, not device-tested. Still open until a G615 run: turn 196 on by default (then direct restart fans stop being dropped and indirect fans over 2048 instances stop running as one grid); with 196 off, direct indexed restart fans over the arena are still skipped and indirect fans over 2048 instances that fit the arena are still one grid. APK `large_draw` gains `fan_indirect`, `fan_indexed_indirect` (prefix check with 196 off) and, with `PANVK_FAN_CHUNKS=1`/`LARGE_DRAW_FAN_CHUNKS=1`, `fan_restart_*`, `gs_fan_restart_*`, `fan_instanced_indirect`, `base_inst_fan_*indirect`; not run. [Worklog](../driver-remaining/191-base-instance-splits.md). Original note: CPU instance splits (> 2048 instances) and per-instance fan windows shift `gl_BaseInstance` (pre-existing for other topologies, now also for fans). Indexed fans with primitive restart and indirect fans over the arena are still unhandled.
+25. **Small follow-ups.** Status: jm-v9/004 log level FIXED and verified in the tree (EPERM/EINVAL = expected zone-exists case at `mesa_logd`, every other errno at `mesa_logw`; no change). 114 u_trace DONE (csf-v11/190, build-only, not device-tested: the secondary's u_trace is now appended whenever any segment was called, not only when the last stream is non-empty). android/014 HIDL mapper4 DONE as android/016 (build-only): compiled out by default, `-DPANVK_GRALLOC_HIDL_MAPPER4` re-enables it for standalone tools; nothing else depends on it. Original notes: 114: u_trace of earlier secondary segments is not appended. jm-v9/004: EPERM/EINVAL from EXEC_INIT is now only `mesa_logd`, which hides real failures (log at warning once when it is not the "zone exists" case). android/014: the HIDL mapper4 raw-vtable backend is unreachable from app namespaces and carries ABI risk (drop it or keep it for standalone tools only).
+26. **Series-order fragility.** 110 shifted offsets so that a jm-v9/001 hunk (atoms mutex destroy) applied into the CSF csif error path; jm-v9/005 moves it back. `git apply` accepts offsets silently, so `apply-patches.sh` should fail on any offset, not only on fuzz. **Status: DONE (2026-10-16, build-only).** `scripts/apply-patches.sh` now runs `git apply --check -v` and fails with `PATCH-DRIFT` on any `Hunk #N succeeded at ... (offset ...)` or fuzz line. 40 existing patches applied with offsets and had their `@@` start lines refreshed (content identical; the 2 new patches csf-v11/187-188 were generated at their series position). The strict run on a fresh Mesa 5a07217 checkout applies all 184 patches with zero offsets, and the tree is byte-identical (same `git write-tree`) to the base commit 98c8b2f plus the three patches added since (android/016, csf-v11/189, 190) plus 187-188.
 27. **PanProbe reports skips as PASS.** Status: FIXED (`MainActivity.kt` SKIP handling). The G57 beta.17 "3/17" counts `vmr_secondary`, which logs `SKIP ... vmr=0` then `RESULT PASS`. Report SKIP separately (app side) and count it as not run.
 
 New findings from tester data (2026-10-06, D1 ids 54-90).
 
-28. **Immortalis-G925 named "Mali-G725".** Status: FIXED by csf-v11/131 (runtime name by core count). Cosmetic leftover: the `pan_model.c` row string still says "G725". The `(13, 8, 0)` row is still "G725" in wt-beta17 (`pan_model.c:113`). Cosmetic: rename or add an Immortalis-G925 alias (< 1 h). The third-party driver's deviceID `0xd8300010` is the same GPU (low revision bits differ), not a new gpu_id.
+28. **Immortalis-G925 named "Mali-G725".** Status: FIXED by csf-v11/131 (runtime name by core count). Cosmetic leftover: the `pan_model.c` row string still says "G725". The `(13, 8, 0)` row is still "G725" in wt-beta17 (`pan_model.c:113`). Cosmetic: rename or add an Immortalis-G925 alias (< 1 h). The third-party driver's deviceID `0xd8300010` is the same GPU (low revision bits differ), not a new gpu_id. **Status: DONE (csf-v11/187, build-only, not device-tested).** The `(13, 8, 0)` row is now "G725/G925" (comment names the three marketing names); `panvk_marketing_name()` spells "Mali-G725" for 6-9 cores, so the Vulkan deviceName is unchanged for every core count.
 29. **v13 D3D8/D3D9 cubes run at about 1/3 the frame count of D3D10/D3D11.** Xiaomi 15T Pro (G925): D3D8/D3D9 cubes log 420-450 frames in 27 s, D3D10/D3D11 1360-1400. The stock G615 has no such gap (D3D8/D3D9 1132-1195, D3D10/D3D11 1282-1332). Cause unknown; needs a `DXVK_HUD=full` run on v13.
 30. **PanProbe `large_draw` timeout under Mesa shader logging (harness).** Two stock G615 runs (`2161a553`, `0b225021`) wrote 110-117 MB of shader disassembly and hit the runner's 60 s limit after 11 passing cases. Not a driver bug. Raise the limit when debug logging is on, or warn testers, and record the Mesa debug variables in the upload manifest (app side).
 31. **First beta.16 tester upload.** Infinix X6857 `96a133dc` (imported `.so`): 16/17, only the stock mapper failure. No beta.16 regression seen.
@@ -328,8 +371,8 @@ New findings from tester data (2026-10-06, D1 ids 54-90).
 35. **`minDepth == maxDepth` viewport is not flat.** Status: FIXED in beta.17d by csf-v11/121 (only a non-zero range is widened; a zero range writes exact minDepth and does not depth clip, so the 4 dEQP `inverted_depth_ranges.nodepthclamp_deltazero` cases fail, not in the gates). `depth_stencil` 10/10 on G615. [Worklog](../driver-remaining/120-gs-restart-strip-table.md). `depth_stencil` `d24s8/d32s8_viewport_zero_depth_range` read 0.5 - 1.83e-5 instead of exactly 0.5. `MIN_DEPTH_CLIP_RANGE` (37.7e-6) widens a zero depth range in `panvk_vX_cmd_draw.c:833` and `:890-901`. D3D draws with MinZ == MaxZ (sky boxes, HUD at fixed depth, depth-equal passes) get the wrong depth. Fix: keep the widening for the clip range only, and do not apply it to the viewport depth transform.
 36. **beta.17c PanProbe regressions on v11 (G615).** Status: NOT A REGRESSION (2026-10-06). The APK was built without `-PpanvkSo` and bundled the stale default `build/android-dxint-dist/libvulkan_panfrost.so` (BuildID `587c2bb6`, Mesa without the series) under a beta.17c `bundled-driver.json`. Rebuilt with `-PpanvkSo=/var/tmp/panvk/dist-beta17d/libvulkan_panfrost.so`: 36/36 x3 and `verify_zip.py` OK. Original report: 2026-10-06 suite 29/36: `depth_bounds` (`depthBounds not reported`), `vs_viewport_index` (`shaderOutputViewportIndex not reported`, then `CreateGraphicsPipelines r=-13`), `large_draw` (`points_indirect bad=134466 written=65536 generated=200000`, then `QueueSubmit r=-4` DEVICE_LOST for the rest), `vmr_secondary` (`sec_4x bad=3` and five other secondary/4x cases), and also `gs_viewport_depth` (all three cases wrong depth: `depthL=0.375 expL=0.25`). DXVK/vkd3d/S4 compliance still PASS (both features are soft). Zip: `/var/tmp/panvk/phase4/panprobe-20261006-202914.zip`. Compare with a beta.16 run on the same device, then bisect.
 37. **`robustImageAccess2` on v10+.** Status: DONE as csf-v11/181 (commit 06c4a6b), goes in beta.18-rc2. G615: PanProbe 38/38, CTS robustness2 image 4332/0, vkd3d-proton `D3D12CreateDevice` OK. [Worklog](robust-image-access2.md). Original note: vkd3d-proton device creation requires it; vkd3d compliance lists it as `proton: robustImageAccess2` missing on G615. Blocks any vkd3d-proton run.
-38. **`denormBehaviorIndependence = NONE`** (`panvk_vX_physical_device.c:1069`). Status: OPEN. vkd3d-proton needs denorm independence + FP32 FTZ/preserve for SM 6.2, so it caps at SM 6.0 (`proton: SM6.2` soft missing). Check whether the hardware allows per-bit-size denorm modes and report `INDEPENDENCE_32_BIT_ONLY` or `ALL`.
-39. **`maxFragmentDualSrcAttachments = 8` is suspicious.** Status: OPEN. Most drivers report 1. Write a test that uses dual-source blend with attachments 1-7 (not only 0); if it fails, report 1.
+38. **`denormBehaviorIndependence = NONE`** (`panvk_vX_physical_device.c:1069`). Status: DONE (csf-v11/189, build-only, not device-tested). Valhall has one per-shader FTZ mode (Preserve/DX11 = FP32 flush + FP16 preserve/Always/Abrupt), no per-instruction FTZ, so `32_BIT_ONLY` is reported on v9+ with `shaderDenormFlushToZeroFloat16/64 = false` (preserve true for all, FP32 both); `ALL` is impossible (no "flush FP16, preserve FP32"). Before release run CTS `float_controls` on a v10+ device and revert to NONE if mixed FP16/FP32 cases fail. Original note: vkd3d-proton needs denorm independence + FP32 FTZ/preserve for SM 6.2, so it caps at SM 6.0 (`proton: SM6.2` soft missing). Check whether the hardware allows per-bit-size denorm modes and report `INDEPENDENCE_32_BIT_ONLY` or `ALL`.
+39. **`maxFragmentDualSrcAttachments = 8` is suspicious.** Status: OPEN. Most drivers report 1. Write a test that uses dual-source blend with attachments 1-7 (not only 0); if it fails, report 1. **Status: DONE (csf-v11/188, build-only, not device-tested): reports 1.** Evidence: the compiler keeps a single `blend_src1_type` per shader and asserts it is set once (`bifrost_compile.c` blend2_pan), `panvk_vX_blend.c` builds every RT blend shader from that one type, and Gallium panfrost reports `max_dual_source_render_targets = 1`. D3D11/D3D12 allow dual-source blending on RT0 only, so DXVK/vkd3d lose nothing; `dualSrcBlend` stays true. The test for RT1-7 was not written; 8 was never validated, and the hardware BLEND instruction itself is per-RT, so a later patch could re-raise it once the compiler tracks SRC1 per RT.
 40. **`gs_viewport_depth` intermittent failure (G720 MC8 user report, 2026-10-07).** Status: FIXED by csf-v11/132 (G720 MC12 20/20, G925 10/10). The reporter's G720 MC8 has not been retested on beta.18.
   - Report: user log `panprobe-20261006-223251.zip`. Xiaomi 2511FPC34G, MT6899, Mali-G720 MC8, gpu_id 0xc8700010 (v12), Android 16, kernel 6.6.102, beta.17 (BuildID `313addcb`), PanProbe 1.2.3.
   - Symptom: PanProbe `gs_viewport_depth` (`device/gs-viewport-depth.c`) fails with `FAIL case A_clamp depthL=[1.000000..1.000000] expL=0.250000 depthR=[1.000000..1.000000] expR=0.500000 badDepth=1024 badColor=1024`. Every pixel keeps the clear value, so the GS output is never rasterized. There is no VK_ERROR, fence timeout or kbase fault.
@@ -346,15 +389,17 @@ New findings from tester data (2026-10-06, D1 ids 54-90).
   - v11 G715 (Pixel 8, Firebase): 37/37 on rc1.
   - v12: G720 14/17 in six runs on beta.14/15 (item 16); Immortalis-G720 MC12 37/37 on rc1.
   - v13: two Immortalis-G925 devices, 14/17 on beta.15 (item 16); G925 MC12 37/37 on rc1. First DXVK runs: cubes exit 0 at FL11_0 (item 23), D3D8/D3D9 slow (item 29), Core Keeper reaches Steamworks init (item 32).
-  - v14: G1-Ultra fails `vkCreateDevice` on `MEM_ALLOC_EX` ENOTTY in all 8 runs (item 20; no new data).
+  - v14: G1-Ultra fails `vkCreateDevice` on `MEM_ALLOC_EX` ENOTTY in all 8 runs (item 20; no new data). Superseded 2026-10-16: on rc3 the device works (PanProbe 37/38); only dma-buf import (`MEM_IMPORT` ENOTTY) fails. See "Mali v14 support".
   - Still-unseen gpu_ids: G510, G310, G620, Immortalis-G720, G68, G78, G625, plain G725, G1-Premium, G1-Pro. G710 and G715 are now seen (Firebase, rc1 37/37).
 
 - CTS (beta.13, G615): 188 old failures, same on beta.10 and beta.12: `clipping.user_defined.clip_distance*`/`clip_cull_distance*` through GS or tessellation (128), and `draw.*shader_viewport_index.fragment_shader_2..16` (60). 16 of the clip cases pass when run alone, so some state leaks between cases. Evidence: `validation/driver-remaining/beta13-device/`.
+  - **Status 2026-10-16: root causes found in code; csf-v11/193 written (build-only, not device-tested, BuildID `972fee08`).** No patch up to 192 fixed them (115/132 do not touch FS ViewportIndex; beta.17 still fails the 60). Clip: the GS records keep arena garbage in unused clip lanes (the "state leak") and keep cull packed into the clip lanes. A GS/TCS reading `gl_CullDistance` reads the VS padding, and the FS read 0 for `gl_CullDistance`. Viewport: the vp passthrough drops ViewportIndex, so the FS reads 0. Device rerun list: `validation/driver-remaining/rerun-193.txt`. [Worklog](../driver-remaining/193-cts-clip-viewport-index.md).
+  - **2026-10-16 (csf-v11/194, build-only, not device-tested):** `panvk_create_depth_bounds_fs` compiled with `rs = {0}` (DEVICE_DEFAULT), which hits `UNREACHABLE` in `panvk_buffer_ubo_addr_format` / `panvk_buffer_ssbo_addr_format` in debug builds (undefined behaviour in release). It now passes the all-DISABLED state `panvk_create_shader()` uses, through `panvk_internal_robustness()` (one-line replacement in `panvk_vX_shader.c`, so the jm-v9 hunks keep their line numbers). The other debug-only problems listed in the 193 worklog (GS mediump asserts, compact-var validation, TES attribute locations, stale dominance metadata) remain.
 - 16 KiB pages (110 + jm-v9/005) are untested anywhere: every tester kernel with a page-size build suffix, including the v14 6.12 one, is a `-4k` build. Remaining 4 KiB-only assumption: the GPU MMU granule `pgsize_bitmap = 4K`, unused by the kbase paths. The rest of 110 is items 18 and 20.
 
 - 2 intermittent DeviceLost in `transform_feedback query_copy_*`: not seen in the 096 CTS run (36144-case list, 0 DeviceLost); keep watching.
 - kbase/firmware: a long compute job while the vertex/tiler CSG waits on another CSG can get that group killed (096 root cause). 096 shortens the planner; other long single-workgroup jobs in that position could still hit it. Likely also behind the 2048-instance chunk cap.
-- `draw.*depth_bias_patch_list_tri_line` fails (pre-existing, root cause unknown).
+- `draw.*depth_bias_patch_list_tri_line` fails (pre-existing, root cause unknown). 2026-10-16: still unknown, not addressed by 193. The ZSD bias is set for all primitives, and the tess LINE path's polygon kernel waits on all iterators. Needs a device dump (worklog 193).
 - 077 system-scope signals raise an interrupt per cross-subqueue signal; game perf cost unmeasured.
 - 075 sync_file export uses one device-wide KCPU queue: head-of-line blocking; possible deadlock with wait-before-signal timelines (not seen in CTS).
 - 089: one unreproduced intermittent on the first run after a fresh install (case B drew nothing; swapchain_lifecycle failed once in the same run). Not seen in 11 later gs runs and 6 swapchain runs. `swapchain_lifecycle` also failed once each during 090 and 092 run-alls, then passed on rerun.
@@ -397,3 +442,305 @@ Seen once under Xvfb in the glibc chroot (`x11_wait_for_present` in `destroySwap
 | Pixel 7a (lynx:33) | G710 (v10) | Firebase `matrix-1rshhvtwvqtmf` | 38/38 | |
 
 - No failures. Firebase: 5/5 daily physical runs used (0 left today); one device at a time, no retries. Results: `/var/tmp/panvk/firebase-panprobe/res/rc3cand-*`, RTL: `/var/tmp/panvk/rc3-cand/rtl-x920/`.
+
+## RC3 and RC3-lowmem cloud log findings (2026-10-16)
+
+### Source and method
+
+- Uploads go to the `panvk-upload` Cloudflare Worker (`cloud/upload-worker`, `https://panvk-upload.panvk.workers.dev`). Metadata is in the D1 database `panvk-uploads` (table `uploads`); the zips are in Workers KV and are served at `/blob/<sha256>`. Some older clients uploaded to Catbox or Gofile instead.
+- Query (read-only): every row whose `driver_so_sha256` starts with `b46b9f04` (rc3 Android), `43d4783f` (rc3 glibc), `f550a006` (rc3-lowmem Android) or `96e92576` (rc3-lowmem glibc). That gives 303 rows from 2026-10-11 to 2026-10-16 (D1 ids up to 884), from 79 device models.
+- Downloaded and sha256-checked: 254 from KV and 42 from Catbox, so 296 of 303. Six Gofile-only uploads could not be fetched (Gofile answers `error-notPremium` / `error-rateLimit`), and one row has no link.
+- Data: `/var/tmp/panvk/cloud-rc3/` (`rows.json`, `blobs/`, extracted zips in `x/`, `probe_fails.json`, `play_sessions.json`).
+
+| Build | PanProbe uploads | PanPlay uploads |
+|---|---|---|
+| rc3 Android (`b46b9f04`, BuildID `4ec75e25`) | 78 | 151 |
+| rc3 glibc (`43d4783f`) | 5 (imported into PanProbe by mistake) | 0 |
+| rc3-lowmem Android (`f550a006`, BuildID `9d975491`) | 59 | 5 |
+| rc3-lowmem glibc (`96e92576`) | 4 (imported into PanProbe by mistake) | 1 |
+
+PanPlay was not re-released with lowmem, so almost all game sessions are on rc3.
+
+### Device coverage
+
+PanProbe (Android builds only; "full" = 38/38):
+
+| Arch | GPUs seen | rc3 reports (full) / devices | lowmem reports (full) / devices |
+|---|---|---|---|
+| v6 | G72 MP3 | none | 1 (0) / 1, dlopen fails on Android 10 |
+| v7 | G52, G52 MC2, G76, G76 MC4 | 5 (0) / 4 | none |
+| v9 | G57 MC1/MC2, G68 MC2/MC4/MC5, G77 MC9, G78 MC14/MC20 | 16 (13) / 12 | 12 (11) / 8 |
+| v10 | G610 MC4/MC6, G710 MC7/MC10 | 6 (5) / 4 | 1 (1) / 1 |
+| v11 | G615 MC2/MC5/MC6, G715 MC7, Immortalis-G715 MC11 | 19 (18) / 12 | 20 (18) / 11 |
+| v12 | G720 MC7/MC8, Immortalis-G720 MC12 | 8 (8) / 4 | 11 (9) / 5 |
+| v13 | Immortalis-G925 MC11/MC12 | 19 (19) / 6 | 11 (11) / 5 |
+| v14 | G1-Ultra MC12 | 3 (0, all 37/38) / 2 | 2 (0, all 37/38) / 2 |
+
+PanPlay (153 sessions with logs; "clean" = normal exit or user exit with no driver error in the logs):
+
+| Arch | rc3 sessions (clean) / devices | lowmem sessions (clean) |
+|---|---|---|
+| v6 / v7 | 1 (0) / 1 each | none |
+| v9 | 14 (9) / 7 | 4 (2), plus 1 glibc |
+| v10 | 19 (11) / 3 | none |
+| v11 | 28 (14) / 8 | 1 (1) |
+| v12 | 21 (10) / 3 | none |
+| v13 | 55 (52) / 5 | none |
+| v14 | 8 (5 really clean; 3 hit `MEM_IMPORT`) / 2 | none |
+
+Many non-clean sessions on v10-v12 are game-side exits with no driver error (Wine exit codes 1, 3, 5, 45 and 53, for example Little Nightmares, Assassin's Creed III/Unity, Skyrim, Sekiro, The Witcher 2, Tales of Berseria), plus three Wine crashes (signal 125/127, one SIGKILL on Crysis 3) and four Wine page faults in the game (Mafia II, Sekiro, Sleeping Dogs, Detention). None of these show a Mesa or kbase error, so they are not counted as driver bugs here.
+
+### Errors grouped by root cause
+
+| # | Root cause | App | Build | Devices (GPU, gpu_id, arch) | Test or game | Exact error line |
+|---|---|---|---|---|---|---|
+| A | CSF subqueue timeout, then DEVICE_LOST (driver, open) | PanPlay | rc3 | G720 MC8 `0xc8700010` v12 (2511FPC34G) x3; G715 MC7 `0xb8a21020` v11 (Pixel 8, 8 Pro) x3; G610 MC6 `0xa8670000` v10 (Infinix X6871) x3; Immortalis-G925 MC12 `0xd8300015` v13 (2506BPN68G) x2; G615 MC6 `0xb8a31030` v11 (2311DRK48G, 2406APNFAG) x2; G610 MC4 v10 (23090RA98I) x1 | Stray (x4), Mafia II (x2), Dead Space 3 (x2), Super Meat Boy 3D (x2), Castlevania LoS2, Dead Cells, RE7, Rubinite | `E MESA : kbase: timeout on subqueue 0: seqno 38635, ls_copy 0, target 38636, marks pre/post-call/post-wait 0x0/0x0/0x0, stream progress 0x0, ... error 0x0`, then `err: DxvkSubmissionQueue: Command submission failed: VK_ERROR_DEVICE_LOST` |
+| B | CSF group fatal error, MMU translation fault (driver, open) | PanPlay | rc3 | G615 MC6 `0xb8a31030` v11 (Infinix X6873) x2 | Dark Souls | `E MESA : kbase: CSF group 1 fatal error: status 0x222002c1 (exception 0xc1), sideband 0x0000000000175300` |
+| C | v9 JM refuses placed maps of non-dma-buf BOs (driver, open) | PanPlay | rc3, lowmem | G78 MC14 `0x92020010` v9 (SM-S901B) x2; G77 MC9 `0x90800011` v9 (21061110AG) x2; G57 MC4 `0x90910010` v9 (GammaOS) x1 | RE6, RE Revelations, Tomb Raider, MXGP, D3D8 cube x86 (all 32-bit) | `E MESA : kbase: placed map of a non-dma-buf BO is not supported`, `bo_mmap(...) failed: Operation not supported on transport endpoint`, `err: Failed to map Vulkan memory: VK_ERROR_MEMORY_MAP_FAILED` |
+| D | v14 `KBASE_IOCTL_MEM_IMPORT` ENOTTY (driver, open) | PanProbe, PanPlay | rc3, lowmem | G1-Ultra MC12 `0xe8800010` v14 (2602EPTC0G, PLG110, V2514, CPH2797) | PanProbe `swapchain_lifecycle` (5 of 5 reports); PanPlay x86 cubes (3 sessions) | `kbase: KBASE_IOCTL_MEM_IMPORT failed: Inappropriate ioctl for device`, `FAIL vkCreateSwapchainKHR res=-1000072003 phase=create_swapchain` (VK_ERROR_INVALID_EXTERNAL_HANDLE) |
+| E | X11 surface re-creation fails with OOHM after OUT_OF_DATE (driver WSI, low) | PanPlay | rc3 | G68 MC4 `0x92041010` v9 x4; G57 MC2/MC1 v9 x3; once each on G610 v10, G615 MC2 v11, Immortalis-G720 v12, G925 v13 | D3D8/D3D9 cubes, Just Cause 2 (x2), Dead Space 2 | `err: Presenter: Failed to get surface capabilities: VK_ERROR_SURFACE_LOST_KHR`, `err: Presenter: Failed to create Vulkan surface: VK_ERROR_OUT_OF_HOST_MEMORY` |
+| F | v9 JM DEVICE_LOST (driver, one device each) | PanProbe, PanPlay | rc3 | G57 MC2 `0x90930010` v9 (Infinix X6711) 2 of 2 runs; G57 MC1 `0x90910010` v9 (itel C671L) | `large_draw` after `points_indirect`; one game | `FAIL GetQueryPoolResults r=-4 line=467`; `E MESA : kbase: JM atom 103 failed: event=0x4 core_req=0x1` |
+| G | ICD needs Android 11 (`call_once`) (build) | PanProbe | rc3, lowmem | G76 MC4 `0x72110000` v7 (Redmi Note 8 Pro, Android 10) x3; G76 v7 (ANA-NX9, Android 10); G72 MP3 `0x62210030` v6 (vivo 1806, Android 10) | all 38 tests | `FAIL dlopen dlopen failed: cannot locate symbol "call_once" referenced by ".../libvulkan_panfrost.so"` |
+| H | v7 Bifrost not enabled (driver, by design) | PanProbe, PanPlay | rc3 | G52 MC2 `0x74021000` variant 0x2 v7 (SM-A315F, TECNO KJ5n); G52 `0x72120000` v7 (SM-M127F); G72 `0x62210010` v6 (SM-A515F, PanPlay) | all tests; D3D8 cubes | `panvk: Unknown gpu_id (0x74021000) or variant (0x2)`; `not well-tested on v7, pass PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1 ...`; PanPlay: `err:vulkan:init_physical_devices Failed to enumerate physical devices, res -3` |
+| I | glibc .so imported into PanProbe (app/user) | PanProbe | rc3 glibc, lowmem glibc | G615 MC2/MC6 v11 (A001, TECNO CM7, 2311DRK48G x3), G715 v11 (Pixel 8 Pro), G77 MC9 v9, G57 MC2 v9 (SM-A155F x2) | all tests | `FAIL dlopen dlopen failed: library "libdrm.so.2" not found: needed by .../imported/libimported.so` |
+| J | Test processes ran on the vendor ICD (app) | PanProbe | lowmem | G615 MC6 `0xb8a31030` v11 (2311DRK48G, ids 828 and 832; same tester passed 38/38 in id 768) | 12 and 21 tests failed | `ICD device=Mali-G615 MC6 ... fillModeNonSolid=0 multiViewport=0 shaderClipDistance=0`, `FAIL CreateDevice r=-8 line=160`, `FAIL depthBounds not reported`; no Mesa lines in the test logs although `vulkan-info.json` shows panvk |
+| K | Harness / surface state (app) | PanProbe | rc3, lowmem | G57 MC1 v9 (Infinix X6528), G615 MC2 v11 (TECNO CM7), G710 MC10 v10 (CPH2493); G720 MC7 v12 (2412DPC0AG); G68 MC4 v9 (CPH2491) | `swapchain_lifecycle`; `large_draw` onwards | `FAIL no surface`; `FAIL ANativeWindow_getWidth res=-19 phase=resize`; `FAIL dlopen dlopen failed: library ".../imported/libimported.so" not found` (the imported file vanished mid-run) |
+| L | Timing-sensitive perf case | PanProbe | lowmem | G720 MC8 `0xc8700010` v12 (2511FPC34G), 1 of 1 lowmem runs | `depth_bounds` | `FAIL case I_perf_dyn_off plain=2.657ms dyn_off=7.008ms ratio=2.64` (all correctness cases pass) |
+
+### gpu_id table check
+
+- Every gpu_id seen on v9-v14 matches a row in `pan_model.c` (v9 through the product-major fallback from `jm-v9/021`). G77 `0x90800011`, G78 `0x92020010` and G68 `0x92041010` now enumerate and pass 38/38.
+- The only lookup miss is the v7 Mali-G52 r1 `0x74021000`: it reports variant 0x2 (0x3 on an earlier HiPad-Air upload), but the Bifrost rows are variant 0, so `pan_get_model` returns NULL. G52 `0x72120000` (variant 0) and G76 `0x72110000` have rows.
+- Still never seen in any upload: G510, G310, G620, G625, plain G725, G1-Premium, G1-Pro.
+
+### Takeaways
+
+- rc3-lowmem shows no regression against rc3 on the devices that ran both (v9, v11, v12, v13); the only lowmem-only failures are app or harness issues (groups J, K, L).
+- PanProbe is clean on v9-v13. The remaining driver bugs only show up in real games (groups A, B, C) or on v14 (group D).
+
+## Mali v14 support (status 2026-10-16)
+
+**What v14 is:** the fifth-generation "Mali G1" parts (G1-Ultra, G1-Premium, G1-Pro). The table has a G1-Ultra row `(14, 8, 0)` variant 4 for gpu_id `0xe8800010`, and the name is reported correctly. All uploads so far are G1-Ultra MC12 on MediaTek MT6993 phones (vivo V2515/V2514, 2602EPTC0G, PLG110, CPH2797), Linux 6.12 android16 4 KiB-page kernels, kbase CSF uAPI 1.38.
+
+**Status:** works for PanProbe except the Android swapchain; the 64-bit DXVK test cubes run; 32-bit (x86) ones do not.
+
+- The `MEM_ALLOC_EX` ENOTTY blocker from item 20 is solved by the csf-v11/110 fallback: the driver logs `KBASE_IOCTL_MEM_ALLOC_EX failed: Inappropriate ioctl for device; trying KBASE_IOCTL_MEM_ALLOC`, then `mem_alloc via ALLOC`, and queue group create (112-byte layout) and tiler heap init (16-byte layout) succeed.
+- PanProbe rc3 and rc3-lowmem: 37/38 in all 5 reports from 3 phones. The only failure is `swapchain_lifecycle` (`vkCreateSwapchainKHR res=-1000072003`, VK_ERROR_INVALID_EXTERNAL_HANDLE).
+- PanPlay rc3: x64 and ARM64EC D3D10/D3D11 cubes create a swapchain and run (5 sessions). x86 (WOW64) cubes fail: no swapchain is created and the log shows `KBASE_IOCTL_MEM_IMPORT failed: Inappropriate ioctl for device` (3 sessions). No DEVICE_LOST or GPU fault was seen on v14. No real game has been tried yet.
+
+**Blocker:** `KBASE_IOCTL_MEM_IMPORT` returns ENOTTY on this kernel, like `MEM_ALLOC_EX` did. ENOTTY means the ioctl number, which encodes the struct size, does not match what the kernel expects, so the vendor kbase (uAPI 1.38) has changed the layout of `struct kbase_ioctl_mem_import` or renumbered it. Dma-buf import is used for Android swapchain images (AHardwareBuffer) and for the dma-heap placed maps that 32-bit games need (091), so both paths fail.
+
+**Root cause found (2026-10-16), fix csf-v11/186, build-only:** the ioctl numbers are unchanged; MediaTek grew the structs. The MT6993 kbase is public in the OnePlus/OPPO GPL drop (`OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_mt6993`, `vendor/mediatek/kernel_modules/gpu/gpu_mali/mali_avalon/a16w/`, uAPI 1.38, copies in `/var/tmp/panvk/kbase-src-new/mtk6993/`). `config/fragment/mt6993.fragment:92` sets `CONFIG_MALI_MTK_SLC_DYNAMIC_POLICY_V2=y`, and under that option `mali_kbase_ioctl.h` adds `vkAllocateMemoryCallID`, `numOfPlanes`, `in_pbha_8bit` to `mem_import.in` and `out_pbha_8bit` to `mem_import.out` (union 24 -> 40 bytes), and `mali_kbase_csf_ioctl.h:654-666` adds `have_pbha_hint` / `pbha_8bit` to `mem_alloc_ex` (64 -> 72 bytes). `_IOWR` encodes the size, so the Arm requests hit no `case` in `kbase_ioctl()` and get ENOTTY. This is also the real cause of item 20. Stock Arm uAPI 1.38 (`rockchip-linux/kernel`, `Sky1-Linux/cix-gpu-kmd`) keeps the 24-byte `MEM_IMPORT` nr 22 and 64-byte `ALLOC_EX` nr 59. In `kbase_api_mem_import` (`mali_kbase_core_linux.c`), `vkAllocateMemoryCallID == 0` takes the "no PBHA hint" path, so zeroed extras are safe.
+- csf-v11/186 (`186-retry-mem-import-with-the-mtk-slc-layout.patch`): on `MEM_IMPORT` ENOTTY, `kbase_kmod_import_dmabuf` retries nr 22 with the 40-byte MTK layout (extras zero), latches the layout per process, and logs `mem_import via MEM_IMPORT (24 bytes)` or `KBASE_IOCTL_MEM_IMPORT failed: ...; trying the MTK SLC layout` then `mem_import via MTK SLC layout (40 bytes)`. Arm kernels are unchanged. The JM host-pointer import is not touched (CSF does not use it). `ALLOC_EX` keeps the legacy `MEM_ALLOC` fallback; a 72-byte MTK `ALLOC_EX` is not needed.
+- Built (API 29) into `/var/tmp/panvk/dist-v14imp/` from `/var/tmp/panvk/wt-v9-fix` (jm-v7 001-005 + 186): unstripped .so sha256 `e15c6f94`, BuildID `acdb9594fe5160c912ac58a6ffa0bcd2df490948`. No v14 device, so this is untested.
+
+**Next steps:**
+
+0. G1-Ultra tester: PanProbe `swapchain_lifecycle` and the PanPlay x86 cube; logcat must show `mem_import via MTK SLC layout (40 bytes)` and no `KBASE_IOCTL_MEM_IMPORT failed: ... ` error line.
+1. ~~Find the uAPI 1.38 kbase headers.~~ Done, see above. Look for the MT6993 / Dimensity 9500 kernel source drop (vivo, OPPO or Xiaomi GPL releases) or the Arm "Valhall/5th Gen" kbase release that introduced uAPI 1.38, and diff `mali_kbase_ioctl.h` / `mali_kbase_csf_ioctl.h` against the version the driver uses. Check `MEM_IMPORT`, `MEM_ALLOC_EX` and any other ioctl whose size changed.
+2. If the layout is found: add a version-gated `MEM_IMPORT` layout to `kbase_kmod.c` (same pattern as the 110 layout probes). If not: probe a short list of candidate sizes on ENOTTY, as 110 does for queue group create, and log which one the kernel accepts.
+3. If import cannot be fixed quickly: for the Android swapchain, allocate the swapchain image memory in the driver and export it, instead of importing the AHB; for 32-bit games, fall back to the older shadow-copy placed map path (pre-091) on v14.
+4. Log the kbase uAPI version and every ENOTTY ioctl number once at `mesa_logw`, so the next upload shows all ABI mismatches at once.
+5. Verify on a G1-Ultra tester: PanProbe 38/38, PanPlay x86 cube, then one real 32-bit and one 64-bit game. Check also the open v13/v14 points: VPSA default (item 23, FL11_0 vs 11_1) and the D3D8/D3D9 frame rate gap (item 29).
+6. Ask for any G1-Premium or G1-Pro gpu_id; neither has been seen.
+
+## Mali v7 (Bifrost) support (status 2026-10-16)
+
+**What v7 is:** Bifrost second generation: Mali-G51, G31, G52, G52 r1 and G76 (`PAN_PROD_ID(7, x, y)` rows exist in `pan_model.c`). v6 is the first Bifrost generation (G71, G72). These GPUs use the job manager (JM) kbase interface, like v9, not CSF. They are common in 2018-2021 budget and mid-range phones (Helio G85/G88/G90/G95/G99 with G52 MC2, Exynos 850 with G52, Helio G90T and Kirin 980/990 with G76).
+
+**Research (2026-10-16):** upstream, fork survey (JimVulkan/mali-panvk already runs DXVK D3D9-11 on Bifrost kbase), feature gaps and port plan in [BIFROST_V6_V7_RESEARCH.md](BIFROST_V6_V7_RESEARCH.md).
+
+**Update 2026-10-16 (jm-v7 driver):** item 17 (v7 unblock) VERIFIED on Exynos 850 G52 (Galaxy A14 SM-A145F, `0x72120000`): device creation works, atom stride 56 OK, `MEM_JIT_INIT` skip OK (growable GROW_ON_GPF tiler heap). Variant fix (jm-v7 001) VERIFIED on G52 r1 `0x74021000` (variant 0x2). Item 18 baselines done on both G52 MC1 (Exynos 850, A14) and G52 MC2 r1 (Helio G85, A06 SM-A065F): PanProbe 14/38 on each; failures are missing DXVK features (item 19 port), no DEVICE_LOST. Note to check: `u_gralloc_get_buffer_basic_info failed` on mt6768 (A06). The "Status" below is the state before jm-v7. Apps now show the Bifrost "not supported" message only when no device exists; failing tests on v6/v7 get "Bifrost (v7): feature not implemented yet".
+
+**Update 2026-10-16 (item 19, jm-v7-wip 006-013):** builds; **not device-tested**. The patches are in `patches/jm-v7-wip/`; apply them with `git am` on top of the current full series (strict; rebased 2026-10-16 onto the series with jm-v9/031, old BC patch 0013 dropped, tessellation is now 0013). Details, BuildID and the per-patch list are in that directory's README.
+
+What each patch adds on v6/v7:
+- 006: draw prerequisites (no IDVS, MDI, position buffer).
+- 007: geometryShader and geometryStreams, emulated with a compute job.
+- 008-009: transformFeedback, captured from a GS or from a VS through a generated passthrough GS. Also transformFeedbackDraw.
+- 010: robustBufferAccess2 and nullDescriptor, emulated null descriptors (from JimVulkan, MIT).
+- 011: NIR and tiler DCD fixes.
+- 012: the meta save/restore lost the bound GS on v6/v7. This was found in review and is fixed.
+- (old 013 BC call dropped: jm-v9/031 does it for all JM archs)
+- 013 (new): tessellationShader and extendedDynamicState2PatchControlPoints, with the v9 limits.
+  - Design: the VS draw runs with a TCS compute job instead of its tiler job. Then come libpoly tessellator kernels built for v6/v7: count, a serial prefix sum (the 1024-wide one is not used), and write. Last, an indirect draw over the tessellator indices with the TES as its vertex shader. The GS emulation and XFB after the TES reuse 007-009.
+  - A 64 MB device arena holds the tess data. Every kernel is a barrier job, and there is no CPU readback.
+  - Limits: 8192 patches, 2^20 indices, and 8192 primitives into a GS or XFB per draw. Whole patches past these are dropped.
+  - `PANVK_DEBUG=no_tess` turns it off.
+  - Host check under the panfrost drm-shim (G52/G72/G76 IDs): compile with NIR validation, recording of direct, indexed, indirect, byte-count, GS and XFB tessellated draws, and valgrind are all clean. This is not submission and not a device run.
+  - New BuildID `09587b23aab8a8ac2787c49f75823aefbc765632` (`dist/j/`, 006-013 on the current series).
+
+BC emulation is arch-independent and was already on for v6/v7 (compute decode; the fragment/AFRC shadow path is v10+). The missing JM decode of images leaving `ZERO_INITIALIZED` now comes from jm-v9/031 (all JM archs).
+
+Still off on v6/v7:
+- fillModeNonSolid, multiViewport, depthBounds, pipelineStatisticsQuery, robustImageAccess2, transformFeedbackQueries.
+
+Next: PanProbe on RTL A06/A14 (baseline 14/38) with the 013 build, including `tessellation`, `gs_tess_primitive_id` and `large_draw`. Then CTS `dEQP-VK.tessellation.*`, and DXVK D3D11 titles, which can now pick FL11_0 (`PANVK_DEBUG=no_tess` falls back).
+
+**Status (before jm-v7):** not supported. The Android ICD already builds the v6 and v7 backends (`bifrost_archs = [6, 7]`, `jm_archs = [6, 7, 9]`), and kbase opens on these devices (`kbase: JM driver, uAPI version 11.27 / 11.35 / 11.38`, `stock JM atom layout (stride 72 refused), stride 56`), but no physical device is created:
+
+| Device | GPU / gpu_id | What stops it |
+|---|---|---|
+| SM-M127F (Exynos 850, Android 13) | G52 `0x72120000`, variant 0 | Model row found, then the upstream gate: `not well-tested on v7, pass PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1`. |
+| SM-A315F, TECNO KJ5n (Helio G80/G85, Android 12/13) | G52 MC2 (G52 r1) `0x74021000`, variant 0x2 | `panvk: Unknown gpu_id (0x74021000) or variant (0x2)`: the `(7, 4, 2)` row is variant 0, and Bifrost has no variants, so this is a lookup bug. Also `KBASE_IOCTL_MEM_JIT_INIT failed: Out of memory (tiler heap creation will not work)`. |
+| Redmi Note 8 Pro, Huawei P40 (Android 10) | G76 `0x72110000` | The ICD does not load at all: `cannot locate symbol "call_once"` (needs Android 11). |
+
+**Blockers:**
+
+1. The `PAN_I_WANT_A_BROKEN_VULKAN_DRIVER` gate for v6/v7 in `panvk_physical_device.c`.
+2. Variant matching: `pan_get_model` compares the kbase-reported variant, which is non-zero on G52 r1. It should be ignored (treated as 0) for arch < 9.
+3. `MEM_JIT_INIT` fails with ENOMEM on the G52 r1 kernels, so the JM tiler heap path will not work as it is.
+4. Feature level: upstream PanVK on v6/v7 reports about Vulkan 1.1 and has none of the DXVK requirements implemented on JM (geometry shaders, tessellation, transform feedback, multiViewport, clip/cull distance, fillModeNonSolid, BC emulation path checks). The v9 JM work (jm-v9 001-030) implemented these for Valhall JM; Bifrost has a different shader ISA (the Bifrost compiler, not Valhall) and different descriptors, so the v9 code does not carry over directly.
+5. Android 10 devices need an API 29 build (item 5 in the refreshed list).
+
+**Next steps (only if v7 is in scope; it was "not a PanVK target" so far):**
+
+1. Cheap, 1-2 h: ignore the variant for arch < 9 in `pan_get_model`, and allow v7 behind a PanVK-kbase option (or drop the gate for kbase builds) so that testers can at least create a device. Log the result of `MEM_JIT_INIT` and try the 110-style fallback (smaller JIT region, or skip JIT and use a plain growable heap).
+2. Run PanProbe on a G52 MC2 (Helio G85/G99 phones are the most common) to get a baseline; expect most DXVK feature tests to be unsupported.
+3. Scope the DXVK minimum on Bifrost: Vulkan 1.3 core features, geometry shader and transform feedback emulation (the v9 compute pre-raster path would need a Bifrost port), BC emulation. This is several weeks of work, similar to or larger than the v9 effort (item 12), with no device in hand. Decide whether a D3D9-only target (DXVK d3d9 needs fewer features) is good enough.
+4. In the apps, show "Bifrost (v6/v7): not supported yet" instead of the current generic "no Mali" / INCOMPATIBLE_DRIVER result.
+
+## v9 follow-up: groups C, E, F (2026-10-16)
+
+- **C (placed map, non-dma-buf BO).** Root cause: the failing devices run kernels without `/dev/dma_heap` (G77 MediaTek 4.14.186; G57 Unisoc 5.4.233; G78 handheld 5.4.302). `dma_heap_fd` stays -1, so host-visible BOs come from the native `MEM_ALLOC` path (`mem_alloc via ALLOC` right before the error) and have no dma-buf. v9 devices on 5.10/5.15 (G57 5.15.189, G615-class, G78 6.1) allocate via dma-heap and pass. mremap/MAP_FIXED on SAME_VA regions is rejected by kbase (see `kbase_kmod_bo_mmap`). Fix: `patches/jm-v7/005` adds an ION fallback (`/dev/ion`, new ABI, system heap found by `ION_IOC_HEAP_QUERY`, cached) feeding the same dma-buf import path. Limits: kernels with the legacy ION ABI (pre-4.12 style `ION_IOC_SHARE`) are not covered; the driver logs `kbase: using ION system heap` / `no usable ION system heap` / `/dev/ion unavailable` at info level. Not device-tested. Needs an RTL G77/G78 (4.14/5.4) 32-bit run.
+- **E (SURFACE_LOST then OOHM).** Not a driver bug. All 11 sessions are user exits (overlay EXIT/Stop, 10-209 s); the two errors are the last lines of the log, and the Winlator X server logs `BadWindow` for the destroyed window. Mesa's x11 WSI correctly returns SURFACE_LOST_KHR for a destroyed window, DXVK then tries to recreate a surface and Wine fails with OOHM because the window is gone. Teardown noise only; the launcher summary could filter it.
+- **F (large_draw r=-4).** Infinix X6711 G57 MC2 (MediaTek, uAPI 11.38): `points_direct`/`points_indirect` pass, the next case (after the 8-chunk truncation warning) takes 8.6 s and `vkGetQueryPoolResults(WAIT)` returns DEVICE_LOST; the probe logs have no kbase error lines, so the first fault is unknown. Not reproducible elsewhere (other G57 MC2 pass 38/38). The game session (UMS9230E G57, 5.15.189) shows 130 atoms with event 0x42 (JOB_READ_FAULT, GPU read of an unmapped address) followed by 37 with 0x4 (TERMINATED, victims of the fault). Root cause unknown; needs a rerun on the own G57 MC2 with `LARGE_DRAW_ONLY=` narrowing and kernel log (`dmesg` fault address) to tell a read of dropped-chunk data from a stale VA.
+
+## Cloud session 2026-10-16: code done, device runs left
+
+Every item in this file that can be closed in code is now patched, built and pushed (branch `claude/new-session-6i5cyb`). Nothing below has run on a Mali device. Test build of the full series (191 patches, strict, zero offsets, API 29, NDK r30): BuildID `e90d9ed40527172765dddf0f7bf888c2369d8f24`. Bifrost testing needs the series plus `patches/jm-v7-wip/0006-0013` (`git am`), BuildID `09587b23` (before 195/196, which are CSF-only).
+
+Done in code this session (build-only):
+| Item | Patch | Device proof needed |
+|---|---|---|
+| 11 async submission | scoped; csf-v11/192 heap TERM off the submit thread (`PANVK_KBASE_ASYNC_HEAP_TERM=0` to disable) | G615 PanProbe, CTS sync/memory, NFS simpleperf A/B |
+| 19 Bifrost DXVK port | jm-v7-wip 0006-0013: GS, XFB (GS + VS), robustness2, meta GS restore, tessellation (`PANVK_DEBUG=no_tess`); BC via jm-v9/031 | RTL A06/A14 PanProbe vs 14/38, CTS tessellation, DXVK D3D11 at FL11_0 |
+| 24 base instance + fans | csf-v11/191, 195 (default on), 196 (`PANVK_FAN_CHUNKS=1`) | G615 large_draw x5 with/without 196, CTS fan/xfb/geometry/PG |
+| 25 follow-ups | csf-v11/190, android/016 | trace run of a cut secondary |
+| 26 strict series | apply-patches.sh fails on offsets, 40 patches refreshed | none |
+| 28 G925 row | csf-v11/187 | none |
+| 38 denorm | csf-v11/189 (32_BIT_ONLY on v9+) | CTS float_controls on v10+; revert if mixed FP16/FP32 fails |
+| 39 dual source | csf-v11/188 (1 attachment) | none (RT1-7 test not written) |
+| CTS clip/cull + viewport index (188 cases) | csf-v11/193, 194 | rerun `validation/driver-remaining/rerun-193.txt` (458 cases) |
+| v9 BC zero-init | jm-v9/031 | v9 BC upload from ZERO_INITIALIZED |
+
+Left, all need hardware or tester data:
+- A (CSF DEVICE_LOST in games) and B (Dark Souls MMU fault): a real Mali CSF device (G610/G615/G720/G925).
+- D (v14 MEM_IMPORT, csf-v11/186): a G1-Ultra tester.
+- F (G57 `large_draw` r=-4): rerun on the Infinix X6711 with `LARGE_DRAW_ONLY`.
+- API 29 load on Android 10 (Firebase `starlte`/`a10`), and one `scripts/firebase-panprobe.sh` run.
+- 21 (116 depth-bounds rework) on G615; 29 (v13 D3D8/9 frame rate, `DXVK_HUD=full` on G925); 16 KiB page kernels; `depth_bias_patch_list_tri_line` (run alone with `PANVK_DEBUG=dump`); GTA IV issue #2 (needs the reporter's full log and RAM size); the intermittent items under "Open problems".
+- 6 v7 G76 and 21 (goal) G72 v6: not on RTL; G76 only via Firebase.
+
+## RC4 and RC4 lowmem, source status, cloud branch merged (2026-10-20)
+
+**Releases (prereleases):**
+- RC4, tag `panvk-kbase-v0.1.0-rc4`: Mesa `5a07217f03`, driverInfo `PanVK-kbase RC4 (Mesa 26.3.0-devel (git-5a07217f03))`, `.so` SHA-256 `977c0c4c…`, BuildID `6654fada…`, NDK r30, API 29. PanProbe 39/0 on G615 (Poco X6 Pro, Android 16, 2026-10-20; also 39/0 on 2026-10-17). Includes jm-v7 001-005; PanProbe 14/38 on Galaxy A06 (G52 MC2) and A14 (G52 MC1).
+- RC4 lowmem, tag `panvk-kbase-v0.1.0-rc4-lowmem`: Mesa tree `git-5437602824`, original `.so` `595cf591…` (lowmem only with `PANVK_BC_MODE=lowmem`), binary-patched to lowmem by default `c395db09…` (one instruction at file offset `0xe91c68`, `cbz x0` now goes to the lowmem path), BuildID `aff7a07f…` unchanged. `PANVK_BC_MODE=exact` (or anything but `lowmem`) disables it. BC1-5/7 use about 1/2 to 1/3 of the memory. PanProbe 39/0 on G615. **Known issue: `vkCmdCopyImage` and raw readback are wrong for all 16 BC formats in lowmem** (sampling and blits are correct); `bc_decode` raw/copy/blit is 0/0/16.
+
+**Source status (important):**
+- **The exact source of the RC4 lowmem build was never committed and is lost.** The Mesa tree `git-5437602824` with the BC lowmem patches (`PANVK_BC_MODE`) is on no branch, and the `/var/tmp/panvk` worktrees do not exist on this machine (this repo is a fresh clone). The lowmem binary was recovered from a test APK on the reference device and then binary-patched. Do not expect to rebuild it from the repo.
+- RC4 (non-lowmem) is probably rebuildable: Mesa `5a07217f` plus the main series as of `5b87b74` (csf-v11 up to 186, jm-v9 up to 030, jm-v7 001-005; the jm-v7 001-005 patches were committed in `97d0e12` on 2026-10-16 and are applied by `scripts/apply-patches.sh` for g615-v11-csf). This is **not byte-verified**: there is no build log or BuildID record, and the "RC4" driverInfo string came from a build-time override (csf-v11/099 still hardcodes "RC3-lowmem").
+- The `jm-v7-wip` series (006-014, Bifrost geometry shader, transform feedback, tessellation and related) is a continuation written in the cloud. It is unbuilt and untested on a device.
+
+**Cloud branch `claude/new-session-6i5cyb` merged into main (merge `d7353ae`).** Commits: jm-v7-wip 006-008 building on API 29; csf-v11/189, 190 and android/016; csf-v11/191; `apply-patches` strict mode with 40 patches refreshed, csf-v11/187, 188; csf-v11/192; jm-v7-wip 006-013; csf-v11/193; jm-v7-wip 014 tessellation; csf-v11/194, jm-v9/031; jm-v7-wip rebased with 0013 dropped; csf-v11/195, 196; cloud-session summary above.
+
+**What remains:** all device runs. Build and run the merged series on G615 (csf-v11 187-196, jm-v9/031, android/016) and on a v7 device (jm-v7-wip 006-014: Galaxy A06 / A14 first), re-verify RC4 reproducibility from the series, and re-derive the BC lowmem source (including fixing `vkCmdCopyImage` for BC).
+
+**New rule:** commit and push all work to main continuously. The exact source must be on main before any release build, so a release can always be rebuilt from its tag.
+
+## State 2026-10-21 (RC5-dev builds, RC4 reproduction, open items)
+
+Build records are in `builds/` (one file per build, 2026-10-21-*). Nothing below has run on a device unless it says so.
+
+### Builds (all NDK r30 30.0.16248370 unless marked r29, API 29)
+
+| Build | Record | Content | sha256 (stripped) |
+|---|---|---|---|
+| RC5-dev-v7 (r29) | `builds/2026-10-21-v7-build.md` | main 191-patch series, NDK r29 | `a1e68b59…` (A06: about 14/38) |
+| RC5-dev-v7-r30 | `builds/2026-10-21-v7-r30-build.md` | same tree, r30 | `681b7946…` |
+| RC5-dev-v7R | `builds/2026-10-21-v7R-build.md` | main series built the RC4 way (r30, RC4 layout `work/mesa` at 5a07217); code equals RC4 | `1f792783…`, BuildID `4e654961` |
+| RC5-dev-v7E (r30) | `builds/2026-10-21-v7E-build.md` | 192 base patches + jm-v7-wip 0006-0019 (depthBounds, pipeline stats, multiViewport, fillModeNonSolid, 48-byte atom, `PANVK_DEBUG=ria2`); replaces the r29 v7E | `088e08ab…`, BuildID `79fab38a` |
+| RC5-dev-v7F | `builds/2026-10-21-v7F-build.md` | v7E code with tag v7F | see record |
+| RC5-dev-bc-r30 | `builds/2026-10-21-bc-r30-build.md` | BC lowmem v2, csf-v11 up to 202 (patches 200-202: BC lowmem work) + jm-v9 + jm-v7, 197-patch series | `e8bf5a70…`, BuildID `9cdad61a` |
+| RC5-dev-fixes-r30 | `builds/2026-10-21-fixes-r30-build.md` | fixes series, 194 patches (csf-v11/198, 199) | `82f67f5e…` |
+| PanProbe v9 APK | same record | `panprobe-v9.apk` (`dev.zenithblue.panvktest.v9`, sha256 `fc0dc40f…`): slot rc4 = RC4 `977c0c4c…`, slot rc5 = fixes-r30 | |
+| PanProbe v7R / v7E APKs | v7R and v7E records | `panprobe-v7R.apk` (`8fe12ec7…`), `panprobe-v7E.apk` (`616909ef…`); install side by side, rc4 and rc5 slots | |
+
+Earlier r29 stages v7A-v7D and the r29 bc/fixes builds are superseded by their r30 rebuilds (RC4 reproduces only with r30).
+
+### RC4 and RC4-lowmem repackaging (`builds/2026-10-21-rc4-emulator-package.md`)
+
+- RC4 and RC4-lowmem got the RC3-style `-EMULATOR.zip`, the `.adpkg.zip` and six launcher zips. The released `.so` files were wrapped unchanged (`scripts/package-prebuilt.sh`, `scripts/package-launcher-zips.sh`), because the exact RC4 source had not been found at the time. `SOURCE.json` therefore says patchSeriesId "not-reproducible". See the finding below: that label is now too pessimistic for RC4 (not for RC4-lowmem).
+- Names no longer contain `g615` and the zips carry no `gpuId` (the driver supports all Mali GPUs). Old g615-named assets were deleted after the new ones were uploaded; `SHA256SUMS` and release notes were updated.
+- No glibc `.so` was produced for these two releases. `validate-package.sh` was not run on them (it rejects minApi<35 and non-reproducible series ids by design).
+
+### build-android.sh fix (commit 876f6f1)
+
+- `PANVK_KBASE_RELEASE` changes on an existing `BDIR` had no effect (the regenerated cross file is not re-read on `meson setup --reconfigure`, so the old driverInfo stayed). The script now records the string in `$BDIR/.panvk_release` and wipes the BDIR when it differs.
+- The output `.so` is stripped with the NDK `llvm-strip` (the r30 output was left unstripped before).
+- Also (89b71da): the script finds `linux-arm64` NDK host dirs.
+
+### RC4 reproduction finding (`rc4-missing-patch-recovery.md`)
+
+- An r30 rebuild of main in the RC4 layout reproduces RC4: `.rodata` and `.data.rel.ro` are byte-identical (apart from one 13-byte `.text`-relative table) and 10,415 of 10,442 functions are instruction-identical. The v7 path is identical function by function, so RC4's v7 driver is exactly main's jm-v7 001-005. The 27 remaining functions are CSF `panvk_compile_shader` register allocation, runtime-library objects and `:lo12:` layout noise.
+- No missing patch exists. The earlier belief that RC4 "has code main lacks" came from diffing against an r29 build (about 1,600 functions of compiler noise).
+- Consequence for the A06 (G52 MC2 r1): RC4 38/38 versus RC5-dev-v7 (r29) about 14/38 cannot be a driver source gap. It is either the r29 toolchain or the test procedure (app slot, device or firmware unit). v7R decides it, see the queue below.
+- RC4 (non-lowmem) is thus rebuildable from the series (r30, RC4 layout, `PANVK_KBASE_RELEASE=RC4`), unlike the earlier "not byte-verified" note in the 2026-10-20 section. RC4-lowmem source is still lost (see that section).
+
+### Device test queue (all open, nothing here runs without a device)
+
+1. **A06 (Galaxy A06 SM-A065F, G52 MC2 r1, v7):** RC4 and v7R in the same session (PanProbe v7R APK, `--es driver rc4`, then `rc5`), then v7E (`panprobe-v7E.apk`, expect more than 14/38 with jm-v7-wip 0006-0019), then the `rc5-vs-rc4-a06.md` procedure. Decides toolchain versus procedure.
+2. **v6 (G72, Galaxy A51 SM-A515F or vivo 1806 class):** v7E/jm-v7 019 (48-byte atom for pre-11.22 kbase). No v6 device on RTL yet.
+3. **v9 (G57/G68):** `panprobe-v9.apk` with RC4 baseline and fixes-r30 (steps in `builds/2026-10-21-fixes-r30-build.md`): ETC2/ASTC support compare, `vmr_secondary` sample counts, `bc_decode` 128-bit blit (expect 16/16).
+4. **G615 (Poco X6 Pro):** BC r30 build checklist (`builds/2026-10-21-bc-r30-build.md`, csf-v11 197-202: lowmem BC, `vkCmdCopyImage` and raw readback for the 16 BC formats), and the env A/B list via PanProbe `--es env`.
+5. Still device-bound from earlier sections: CSF DEVICE_LOST in games (A), Dark Souls MMU fault (B), v14 `MEM_IMPORT` fix 186 (G1-Ultra), G57 `large_draw` DEVICE_LOST (F), Android 10 load (API 29 build), 21/29, 16 KiB pages.
+
+### Open items classified (2026-10-21)
+
+Device-needed: everything in the queue above, plus A, B, D, F, items 21, 29, 36-only retests, 16 KiB pages, `depth_bias_patch_list_tri_line`, GTA IV issue #2 (reporter log), CTS reruns for csf-v11 187-196, jm-v7-wip performance and DXVK titles.
+Not device-needed (handled 2026-10-21): this PROGRESS update; strict apply check of the default series and jm-v7-wip; stale statements in the RC4 package record (see below); host/CI checks recorded in `builds/2026-10-21-open-items-pass.md`.
+
+## State 2026-10-22 (RC5-dev-v7K device pass, v7K patches, open items)
+
+Nothing below is verified beyond the device run named in the first bullet.
+
+- **A06 (G52, v7), RC5-dev-v7K (git-d160802965, .so sha badc28eb31786c33...):** PanProbe 38 pass / 0 fail / 0 skip (v7J 37/0/1, v7I 35/2, RC4 14/19/5). See `device-runs/2026-10-22-a06-v7K/results.md`.
+- **v7K patches:** jm-v7-wip 0059 (descriptor-read reorder: the RIA2 penalty went from +35-38% to +0.3%, ria2 169.49 ms vs ria1 169.02 ms), 0060 (waterfall only on NonUniform divergent indices), 0061 (BeginQuery keeps overlap), 0062 (AFBC kept with customBorderColorWithoutFormat on non-sampled images). Also the PanProbe swapchain harness fix (swapchain_lifecycle now PASS, 45.6 fps).
+- **pipeline_stats:** 1343 fps. The v7J 618 was noise.
+- **Pending:**
+  - The A06 A/B with PANVK_V7_DESC_REORDER=0 (the device dropped).
+  - G615 bc2 full suite and BC timing/memory vs RC4-lowmem.
+  - v6 and v9 device runs.
+  - Deferred review items H5, M8, M12, M13, M15, M16 (reasons in `builds/v7K.md`).
+
+## RC5 BC = bc4 (permanent) (2026-10-22)
+
+Decision: the RC5 G615 BC configuration is bc4 and is the default series. `scripts/apply-patches.sh` applies every file in `patches/csf-v11/` in order, so 197-208 (and later additions such as 209) are part of RC5 with no list to maintain; build.yml and source-drift.yml call it with `--profile g615-v11-csf`, release.yml packages what build-android.sh produces. Nothing pins an older BC config.
+
+bc4 = csf-v11 197-203 plus: 204 Android shader cache dir, 205 lazy prerast arenas, 206 cheap BC3 alpha/BC4/BC5 endpoint-pair-table encoders (ported from GunaCharanTeja/panvk-kbase-android, MIT), 207 lazy raw store, 208 opt-in signed BC6H to ASTC HDR. Record: `builds/bc4.md`; device data: `device-runs/2026-10-22-g615-bc4/results.md`.
+
+Poco X6 Pro (G615), bc4 vs RC4-lowmem, upload_gpu_ms (bc4 = mean of 5 runs, RC4 = mean of 2):
+
+| format | RC4-lowmem | bc4 | verdict |
+|---|---|---|---|
+| BC1 RGB / RGBA | 2.63 / 2.91 | 2.63 / 2.80 | tie |
+| BC2 | 4.64 | 3.70 | -20% |
+| BC3 UNORM / SRGB | 4.20 / 4.01 | 3.40 / 3.12 | -19% / -22% |
+| BC4 UNORM / SNORM | 1.81 / 2.38 | 1.24 / 1.22 | -31% / -49% |
+| BC5 UNORM / SNORM | 2.40 / 2.71 | 1.92 / 2.13 | -20% / -21% |
+| BC6H UF / SF | 8.34 / 9.98 | 8.57 / 9.77 | tie |
+| BC7 UNORM / SRGB | 6.12 / 5.88 | 6.37 / 6.32 | tie to +4-7% (inside spread) |
+
+| | RC4-lowmem | bc4 |
+|---|---|---|
+| bc_perf wall | 28.4-28.8 s | 28.0-28.7 s (bc3: 57.5 s) |
+| bc_decode | FAIL (raw/copy) | PASS |
+| process RSS (end) | 188 MiB | 90-93 MiB (-52%) |
+| hwm | 277 MB | 179-181 MB (-35%) |
+| /dev/mali mapping | 114 MB | 28 MB (-75%) |
+
+Known issue: patch 204 makes the Mesa disk shader cache actually work on Android, and vkd3d_heap then hangs (ICD watchdog 12 s, 37/38). With `MESA_SHADER_CACHE_DISABLE=true` it passes (266 ms, 38/38). The cache gave no measured speedup (bc_perf 28354 vs 28693 ms). BC and prerast toggles are irrelevant.
+Workaround outside Mesa: PanProbe (`apps/panvk-test` `buildEnv`) now sets `MESA_SHADER_CACHE_DISABLE=true` by default for the driver processes (`--es env` can override). The launcher zip README (`scripts/package-launcher-zips.sh`) tells PanPlay users to add it to the container env on a hang. PanPlay itself still sets `MESA_SHADER_CACHE_DISABLE=false` (Containers.kt) and was not changed; revisit if a vkd3d title hangs.
+
+bc5 pending: csf-v11 209 (restart util_queue workers in a fork() child) is the Mesa-side fix for the vkd3d_heap hang, in progress by another agent. Once device-verified with the cache enabled, drop the PanProbe default and the README note.

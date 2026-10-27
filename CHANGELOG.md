@@ -1,5 +1,71 @@
 # Changelog
 
+## Unreleased (115)
+
+### Changed
+
+- **Upstream-style driver identity** (`patches/jm-v7-wip` 0120): `driverInfo` is now
+  `Mesa 26.3.0-devel (git-<sha>)`, as an upstream Mesa PanVK development build reports it (`driverName`
+  `panvk`; `deviceName` unchanged, it already matches upstream). The `PANVK_FPS_LOG` header reads
+  `# panvk-fps Mesa 26.3.0-devel (git-<sha>) pid=...`. Earlier builds reported
+  `PanVK-kbase <release> (Mesa 26.3.0-devel (git-<sha>))`; the `PANVK_KBASE_RELEASE` build define no longer has
+  an effect.
+- PanPlay and PanProbe show the bundled driver as **Mesa PanVK 26.3.0-devel** (git sha in the details).
+- Packages are named after the driver identity (`scripts/driver_identity.py`): meta name
+  `Mesa-PanVK-26.3.0-devel-<sha8>`, `driverVersion` = the exact `driverInfo`, zips
+  `Mesa-PanVK-Android-<version>-<sha8>-<launcher>.zip`, `Mesa-PanVK-Android-<version>-<sha8>.adpkg.zip` and
+  `Mesa-PanVK-<version>-<sha8>-EMULATOR.zip`. Release title `Mesa PanVK <tag>`. Tags keep the
+  `panvk-kbase-v` prefix. Builds that still report the old string keep the old package names.
+- `validate-package.sh` no longer reads `-devel` as the `dev` tier.
+- PanPlay **1.3.0** (versionCode 41; 1.2.7 was 33, the 1.2.9-rc5 test builds 35-40) and PanProbe **1.3.0**
+  (versionCode 16; 1.2.7 was 15). PanPlay's What's New lists the changes since 1.2.7. The bundled driver's `packageVersion` is the
+  Mesa version, `26.3.0-devel` (was `0.1.0-rc5`), in PanPlay and PanProbe, so the update card shows
+  `26.3.0-devel` instead of `rc5`. The update check offers only releases tagged above 26.3.0 to these builds
+  (`docs/RELEASE.md`). Package ids and the PanProbe `rc4`/`rc5` driver slots are unchanged.
+- Source: the series plus `patches/jm-v7-wip` 0006-0131 (`scripts/prepare-rc5-tree.sh`, whose defaults are now this
+  tree). The 115 work is jm-v7-wip 0093-0131: the staging-115 packages P-A (CSF CPU record/submit, 0093-0102),
+  P-B (memory, 0103-0112), P-C (present paths, 0113-0119), the driver identity (0120), P-D (JM v6/v7/v9,
+  0121-0127) and the PanPlay fixes (0128-0131: HOST_COHERENT dma-heap memory from `system-uncached` on GPUs without
+  IO coherency, no RandR on an X server without RANDR). Each default-on change has a knob that restores 114
+  (`patches/staging-115/*/NOTES.md`).
+
+### Validation (Firebase Test Lab, 2026-10-27)
+
+Galaxy S9 (Mali-G72 MC18, v6), Galaxy A31 (Mali-G52 MC2, v7), Pixel 6 (Mali-G78 MC20, v9), Pixel 7 (Mali-G710 MC7,
+v10) and Pixel 8 (Mali-G715 MC7, v11), one run each. Results and screenshots are in
+`worklogs/g615-dxvk/device-runs/2026-10-26-ftl-<arch>-<model>-115[-panplay]/`.
+
+- PanProbe 1.3.0: 39/39 on all five phones, in both `defaults` and `114-knobs`. The test times show no regression
+  against 114/115pre: the A31's +12.6 % is the FTL phone (see its run). `tess_perf` images match 114.
+- PanPlay 1.3.0, D3D11 cube / D3D9 cube / SquidRoom / gears:
+  - Pixel 8: 395 / 118 (vsync) / 74.3 / 166 fps. The D3D9 HUD is clean.
+  - Pixel 6: 168 / 90 (vsync) / 27.0 / 233 fps. The D3D9 HUD is clean.
+  - Pixel 7: only SquidRoom passes (85.8 fps); see Known issues.
+  - Galaxy A31: first DXVK and vkd3d-proton run on v7; see Known issues.
+  - Galaxy S9: no D3D test ran (Wine setup on Android 10); see Known issues.
+- D3D12 (vkd3d-proton 2230755) creates its device at the requested FL 11_0 on every arch.
+  - Max feature level: 11_1 on v9-v11, 11_0 on v6/v7 (`maxPerStageDescriptorStorageImages` is 32, 11_1 needs 64).
+  - Shader model: 6.8 on v9-v11, 6.5 on v6/v7 (SM 6.6 needs `VK_KHR_compute_shader_derivatives`).
+  - 12_0 is blocked everywhere by tiled resources tier 2 (sparse binding and residency).
+  - 12_1 is blocked by ROVs (`VK_EXT_fragment_shader_interlock`) and, except on v11, by conservative rasterization.
+
+### Known issues (115)
+
+- **Pixel 7 (G710, v10):** PanPlay's D3D11 cube, D3D9 cube and vkd3d-proton gears hang the GPU queue 1.5-18 s after their
+  first present: `kbase: timeout on subqueue 0`, all three subqueues stopped at one seqno, no fault. DEVICE_LOST follows.
+  PanProbe passes on the same phone and the Pixel 8 does not hang, but there is no PanPlay knob A/B yet.
+- **Galaxy A31 (G52, v7):**
+  - D3D11 cube: the first frame's JM atoms are terminated (`event=0x4`), then DEVICE_LOST.
+  - D3D9 cube (32-bit): the WoW64 placed map (`vkMapMemory2EXT`) of a 4 MiB buffer fails with
+    VK_ERROR_MEMORY_MAP_FAILED.
+  - D3D12 SquidRoom: correct picture but 0.9 fps (1.1 s per frame, GPU side).
+  - D3D12 gears: 102 fps, but only the red gear is drawn.
+  - No vkd3d-proton error is logged for either D3D12 problem.
+- **Galaxy S9 (G72, v6, Android 10):** PanPlay's Wine prefix setup fails before any Direct3D call. `wineboot -u`
+  times out and Wine reports `could not load kernel32.dll, status c0000135`. Before that, SELinux denies
+  `ioctl` 0x7201 (VFAT_IOCTL_READDIR_BOTH) on the prefix directories for `untrusted_app_27`. D3D on v6 is
+  still untested.
+
 ## panvk-kbase-v0.1.0-rc3-lowmem (release candidate)
 
 RC3 plus one patch (csf-v11/185), 173 patches on Mesa `5a07217f034b`. Not faster; it trades some BCn

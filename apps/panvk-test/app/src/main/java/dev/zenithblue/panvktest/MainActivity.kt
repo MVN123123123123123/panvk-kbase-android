@@ -77,10 +77,19 @@ data class RunItem(
     val compliance: String = "" // "DXVK PASS · S4 FAIL · vkd3d FAIL" from summary.json
 )
 
-enum class DriverType(val label: String) {
-    BUNDLED("Bundled PanVK"),
+// label is stored as summary.json "driverType"; legacyLabel is the label older PanProbe builds stored there.
+enum class DriverType(val label: String, val slot: String? = null, val legacyLabel: String? = null) {
+    RC5("Bundled Mesa PanVK", "rc5", "Bundled PanVK RC5"),
+    RC4("Bundled PanVK RC4 (previous release)", "rc4", "Bundled PanVK RC4"),
     SYSTEM("System Vulkan"),
-    IMPORTED("Imported .so")
+    IMPORTED("Imported .so");
+
+    val isBundled get() = slot != null
+
+    companion object {
+        fun ofLabel(label: String?): DriverType? =
+            label?.let { l -> entries.firstOrNull { it.label == l || it.legacyLabel == l } }
+    }
 }
 
 data class TestCase(
@@ -111,6 +120,7 @@ class MainActivity : ComponentActivity() {
         TestCase("fill_mode", isDraw = true),
         TestCase("bc_decode", isDraw = false) { ctx -> listOf(ctx.cacheDir.absolutePath) },
         TestCase("bc_perf", isDraw = false, timeoutMs = 300_000),
+        TestCase("tess_perf", isDraw = false, timeoutMs = 240_000),
         TestCase("geometry", isDraw = true),
         TestCase("tessellation", isDraw = true),
         TestCase("xfb", isDraw = true),
@@ -142,12 +152,13 @@ class MainActivity : ComponentActivity() {
         // Requirement checkers: FAIL only when a hard requirement is missing (soft gaps still PASS).
         TestCase("dxvk_reqs", isDraw = false),
         TestCase("vkd3d_reqs", isDraw = false),
+        TestCase("d3d_fl", isDraw = false),
         TestCase("vkd3d_heap", isDraw = false),
         TestCase("vkd3d_timeline", isDraw = false),
         TestCase("swapchain_lifecycle", isDraw = true)
     )
 
-    private var driverTypeState = mutableStateOf(DriverType.BUNDLED)
+    private var driverTypeState = mutableStateOf(DriverType.RC5)
     private var mesaDebugEnabledState = mutableStateOf(false)
     private var mesaDebugStrState = mutableStateOf("MESA_DEBUG=1 PANVK_DEBUG=trace")
     private var importedFileNameState = mutableStateOf<String?>(null)
@@ -213,24 +224,29 @@ class MainActivity : ComponentActivity() {
         val savedDriver = sp.getString("driver", null)
         if (savedDriver != null) {
             val loadedType = when (savedDriver.uppercase(Locale.US)) {
-                "BUNDLED" -> DriverType.BUNDLED
+                "BUNDLED", "RC5" -> DriverType.RC5
+                "RC4" -> DriverType.RC4
                 "SYSTEM" -> DriverType.SYSTEM
                 "IMPORTED" -> {
                     val importedSo = File(filesDir, "imported/libimported.so")
-                    if (importedSo.exists()) DriverType.IMPORTED else DriverType.BUNDLED
+                    if (importedSo.exists()) DriverType.IMPORTED else DriverType.RC5
                 }
-                else -> DriverType.BUNDLED
+                else -> DriverType.RC5
             }
             driverTypeState.value = loadedType
         }
 
         // Read intent extras for headless testing
-        val driverExtra = intent.getStringExtra("driver")
+        val driverExtra = intent.getStringExtra("driver") ?: if (gameLoop) "bundled" else null
         if (driverExtra != null) {
             when (driverExtra.lowercase(Locale.US)) {
-                "bundled" -> {
-                    driverTypeState.value = DriverType.BUNDLED
-                    saveDriverSelection(DriverType.BUNDLED)
+                "bundled", "rc5" -> {
+                    driverTypeState.value = DriverType.RC5
+                    saveDriverSelection(DriverType.RC5)
+                }
+                "rc4" -> {
+                    driverTypeState.value = DriverType.RC4
+                    saveDriverSelection(DriverType.RC4)
                 }
                 "system" -> {
                     driverTypeState.value = DriverType.SYSTEM
@@ -241,6 +257,25 @@ class MainActivity : ComponentActivity() {
                     saveDriverSelection(DriverType.IMPORTED)
                 }
             }
+        }
+
+        // --es env "KEY=VAL;KEY2=VAL2": driver env for every test/info child process (exec'd after this, so
+        // always before the driver .so is loaded). Only PANVK_*, MESA_*, PAN_* keys are accepted.
+        intent.getStringExtra("env")?.split(';')?.forEach { pair ->
+            val i = pair.indexOf('=')
+            val k = if (i > 0) pair.substring(0, i).trim() else ""
+            val v = if (i > 0) pair.substring(i + 1).trim() else ""
+            if (k.matches(Regex("(PANVK|MESA|PAN)_[A-Za-z0-9_]*"))) {
+                extraEnv.add("$k=$v")
+                Log.i("PanProbe", "PANPROBE_ENV key=$k val=$v")
+            } else if (pair.isNotBlank()) {
+                Log.w("PanProbe", "PANPROBE_ENV rejected pair=$pair")
+            }
+        }
+
+        // Game loop: v6/v7 drivers may still check the env gate (rc4 does); harmless where it is not needed.
+        if (gameLoop && extraEnv.none { it.startsWith("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=") }) {
+            extraEnv.add("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1")
         }
 
         // Debug builds only (checked in DriverUpdate): --es updateAs 0.1.0-beta.15 makes an older release look newer.
@@ -279,8 +314,24 @@ class MainActivity : ComponentActivity() {
         // Game loop: a recreated activity restarts the run (the old coroutine died with lifecycleScope).
         if (autorunExtra != null && (savedInstanceState == null || gameLoop)) {
             selectedTabState.intValue = 2 // Switch UI to Tests tab
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) // live surface needs the screen on
+            setShowWhenLocked(true); setTurnScreenOn(true)  // wake the display so the SurfaceView window becomes visible
             lifecycleScope.launch(Dispatchers.IO) {
-                runHeadlessAutorun(autorunExtra)
+                if (gameLoop) {
+                    // Firebase scenario 1 = rc5 then rc4, scenario 2 = rc5 only (--scenario-numbers),
+                    // scenario 3 = rc5 once per env pass of assets/env-ab.json (driver knob A/B, EnvPasses.kt).
+                    // --ei scenario N overrides for local testing. rc4 may refuse v6; that is recorded.
+                    val scenario = intent.getIntExtra("scenario", 1)
+                    say0("GAMELOOP scenario=$scenario")
+                    if (scenario == 3) runEnvPasses(autorunExtra)
+                    else {
+                        runHeadlessAutorun(autorunExtra, final = scenario == 2)
+                        if (scenario != 2) {
+                            withContext(Dispatchers.Main) { driverTypeState.value = DriverType.RC4 }
+                            runHeadlessAutorun(autorunExtra, final = true, first = false)
+                        }
+                    }
+                } else runHeadlessAutorun(autorunExtra)
             }
         }
 
@@ -341,7 +392,7 @@ class MainActivity : ComponentActivity() {
                                 fail = (total - pass - skip).coerceAtLeast(0)
                             }
                             json.optJSONObject("compliance")?.let { c ->
-                                compliance = listOf("dxvk" to "DXVK", "bachata_s4" to "S4", "vkd3d" to "vkd3d").mapNotNull { (k, label) ->
+                                compliance = listOf("dxvk" to "DXVK", "bachata_s4" to "S4", "vkd3d" to "vkd3d", "d3d_fl" to "FL").mapNotNull { (k, label) ->
                                     c.optJSONObject(k)?.let { "$label ${if (it.optBoolean("pass")) "PASS" else "FAIL"}" }
                                 }.joinToString(" · ")
                             }
@@ -369,9 +420,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun loadBundledDriverJson(): JSONObject? {
+    /** Metadata of one bundled slot (derived from the actual .so at build time), or null. */
+    private fun loadBundledDriverJson(type: DriverType): JSONObject? {
+        val slot = type.slot ?: return null
         return try {
             assets.open("bundled-driver.json").bufferedReader().use { JSONObject(it.readText()) }
+                .optJSONObject("drivers")?.optJSONObject(slot)
         } catch (_: Exception) {
             null
         }
@@ -438,9 +492,11 @@ class MainActivity : ComponentActivity() {
     private suspend fun writeRun(results: List<TestResult>): File = withContext(Dispatchers.IO) {
         val timestamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
         val runsDir = File(filesDir, "runs").apply { mkdirs() }
-        var runFolder = File(runsDir, timestamp)
+        // Scenario 3: the env pass name in the folder name too (runs/<time>-<pass>), so pulled runs say which pass.
+        val base = envPass?.let { "$timestamp-${it.name}" } ?: timestamp
+        var runFolder = File(runsDir, base)
         var n = 2
-        while (runFolder.exists()) runFolder = File(runsDir, "$timestamp-${n++}")
+        while (runFolder.exists()) runFolder = File(runsDir, "$base-${n++}")
         runFolder.mkdirs()
 
         for (res in results) {
@@ -501,6 +557,7 @@ class MainActivity : ComponentActivity() {
             put("startMs", System.currentTimeMillis() - results.sumOf { it.durationMs } - 60_000L)
             put("appVersion", getAppVersion())
             put("driverType", driverTypeState.value.label)
+            envPass?.let { put("envPass", EnvPasses.toJson(it, envPassSource)) }
 
             val firstDevProps = parsedObj?.optJSONArray("devices")?.optJSONObject(0)?.optJSONObject("properties")
             if (firstDevProps != null) {
@@ -649,7 +706,7 @@ class MainActivity : ComponentActivity() {
                 try { JSONObject(summaryFile.readText()).optString("driverType").takeIf { it.isNotEmpty() } } catch (_: Exception) { null }
             } else null
 
-            val resolvedDriverType = DriverType.entries.firstOrNull { it.label == summaryDriverTypeLabel }
+            val resolvedDriverType = DriverType.ofLabel(summaryDriverTypeLabel)
                 ?: driverTypeState.value
             val driverPath = getDriverPath(resolvedDriverType)
             val driverFile = File(driverPath)
@@ -678,10 +735,11 @@ class MainActivity : ComponentActivity() {
 
             // 6b. driver-load.json: which driver was loaded, its identity, and whether loading worked.
             run {
-                val bundledMeta = if (resolvedDriverType == DriverType.BUNDLED) loadBundledDriverJson() else null
+                val bundledMeta = loadBundledDriverJson(resolvedDriverType)
                 val importedName = importedFileNameState.value
                 val source = when (resolvedDriverType) {
-                    DriverType.BUNDLED -> "bundled"
+                    DriverType.RC4 -> "bundled-rc4"
+                    DriverType.RC5 -> "bundled-rc5"
                     DriverType.SYSTEM -> "system"
                     DriverType.IMPORTED -> if (importedName?.endsWith("GitHub)") == true) "downloaded" else "imported"
                 }
@@ -698,6 +756,9 @@ class MainActivity : ComponentActivity() {
                     put("soSha256", runtimeDriverSha256 ?: JSONObject.NULL)
                     put("buildId", driverBuildId ?: JSONObject.NULL)
                     put("driverName", optVal("driverName"))
+                    // true = Vulkan reported a non-PanVK driver (vendor ICD fallback)
+                    put("vendorIcdFallback", resolvedDriverType != DriverType.SYSTEM && loaded &&
+                        firstDevProps?.optString("driverName")?.contains("panvk", ignoreCase = true) != true)
                     put("driverVersion", optVal("driverVersion"))
                     put("driverInfo", optVal("driverInfo"))
                     if (bundledMeta != null) put("bundledRelease", JSONObject().apply {
@@ -739,7 +800,7 @@ class MainActivity : ComponentActivity() {
                     put("versionName", pInfo?.versionName ?: getAppVersion())
                     put("versionCode", pInfo?.longVersionCode ?: 0L)
                 })
-                val bundledDriverMeta = if (resolvedDriverType == DriverType.BUNDLED) loadBundledDriverJson() else null
+                val bundledDriverMeta = loadBundledDriverJson(resolvedDriverType)
                 // Bundled driver: always the pinned release metadata, so the record names it even when enumeration fails.
                 val driverNameVal: Any = bundledDriverMeta?.optString("name")?.takeIf { it.isNotEmpty() }
                     ?: optVal("driverName").takeUnless { it == JSONObject.NULL }
@@ -750,7 +811,7 @@ class MainActivity : ComponentActivity() {
 
                 put("driver", JSONObject().apply {
                     put("type", resolvedDriverType.label)
-                    put("bundled", resolvedDriverType == DriverType.BUNDLED)
+                    put("bundled", resolvedDriverType.isBundled)
                     put("path", driverPath)
                     put("soSha256", runtimeDriverSha256 ?: JSONObject.NULL)
                     put("buildId", driverBuildId ?: JSONObject.NULL)
@@ -816,6 +877,14 @@ class MainActivity : ComponentActivity() {
                     summaryObj.optJSONArray("results")?.let { put("results", it) }
                     summaryObj.optJSONObject("compliance")?.let { put("compliance", it) }
                 }
+                put("mesaDebug", JSONObject().apply {
+                    put("enabled", mesaDebugEnabledState.value)
+                    put("env", JSONObject().apply {
+                        buildEnv(false).filter { e ->
+                            e.contains("=") && listOf("PANVK_", "PAN_MESA_", "PAN_", "MESA_", "PANDECODE_", "VK_", "PT_").any { e.startsWith(it) }
+                        }.forEach { e -> put(e.substringBefore("="), e.substringAfter("=")) }
+                    })
+                })
                 put("deviceFacts", deviceFacts)
                 put("logcat", logcatInfo)
                 put("truncatedLogs", logsInfo)
@@ -837,11 +906,17 @@ class MainActivity : ComponentActivity() {
 
     private fun getDriverPath(type: DriverType): String {
         return when (type) {
-            DriverType.BUNDLED -> File(applicationInfo.nativeLibraryDir, "libvulkan_panfrost.so").absolutePath
+            DriverType.RC4 -> File(applicationInfo.nativeLibraryDir, "libvulkan_panfrost_rc4.so").absolutePath
+            DriverType.RC5 -> File(applicationInfo.nativeLibraryDir, "libvulkan_panfrost_rc5.so").absolutePath
             DriverType.SYSTEM -> "/system/lib64/libvulkan.so"
             DriverType.IMPORTED -> File(filesDir, "imported/libimported.so").absolutePath
         }
     }
+
+    private val extraEnv = mutableListOf<String>()
+    // Game-loop scenario 3: the env pass running now (its env goes after extraEnv), and where the passes came from.
+    @Volatile private var envPass: EnvPass? = null
+    @Volatile private var envPassSource = ""
 
     private fun buildEnv(isDraw: Boolean): Array<String> {
         val envList = mutableListOf<String>()
@@ -856,10 +931,15 @@ class MainActivity : ComponentActivity() {
                 envList.add("PANDECODE_DUMP_FILE=stderr")
             }
         }
+        envList.addAll(extraEnv)
+        envPass?.let { envList.addAll(it.env) }
         if (isDraw) {
             envList.add("PT_FPS_MS=1000")
         }
-        return envList.toTypedArray()
+        // Native.run puts these entries first in envp and getenv() returns the FIRST match, so a
+        // duplicate key must be collapsed here or the default above wins over --es env (bc5 "cache ON"
+        // runs really ran with the cache off). Keep the last value per key, at the key's first position.
+        return envList.associateBy { it.substringBefore('=') }.values.toTypedArray()
     }
 
     private fun createLogFile(name: String): File {
@@ -896,7 +976,9 @@ class MainActivity : ComponentActivity() {
             refreshLogsList()
         }
 
-        Pair(jsonObject, if (jsonObject != null) jsonObject.toString(2) else "Result: $res\n$logContent")
+        val bifrost = UploadLogs.bifrostMessage(logContent)
+        if (bifrost != null) jsonObject?.put("notSupported", bifrost)
+        Pair(jsonObject, if (jsonObject != null) jsonObject.toString(2) else (bifrost?.plus("\n\n") ?: "") + "Result: $res\n$logContent")
     }
 
 
@@ -909,11 +991,17 @@ class MainActivity : ComponentActivity() {
         val args = (listOf(driverPath) + test.extraArgsProvider(this@MainActivity)).toTypedArray()
         val env = buildEnv(test.isDraw)
 
-        val res = Native.run(libPath, args, env, logFile.absolutePath, test.timeoutMs)
+        // Shader/debug logging (PANVK_DEBUG=trace, PANDECODE dumps) slows large_draw a lot: triple its timeout.
+        val timeoutMs = if (test.name == "large_draw" && mesaDebugEnabledState.value) test.timeoutMs * 3 else test.timeoutMs
+        val res = Native.run(libPath, args, env, logFile.absolutePath, timeoutMs)
         val durationMs = System.currentTimeMillis() - t0
 
         var hasFail = false
         var hasSkip = false
+        var sawIcd = false
+        var bifrost: String? = null
+        var bifrostGpu = false
+        var sawPanvk = false // PanVK prints "MESA: info: panvk: ..." at init; the vendor ICD prints none
         var mismatchSum = 0L
         var fps: String? = null
         val mismatchRegex = Regex("""mismatch=(\d+)""")
@@ -925,6 +1013,10 @@ class MainActivity : ComponentActivity() {
             if (trimmed.startsWith("FAIL") || trimmed.startsWith("RESULT FAIL")) hasFail = true
             if (trimmed.startsWith("BENCH ")) bench.add(trimmed.removePrefix("BENCH "))
             if (trimmed.startsWith("RESULT SKIP")) hasSkip = true
+            if (bifrost == null) bifrost = UploadLogs.bifrostMessage(line)
+            if (UploadLogs.isBifrost(line)) bifrostGpu = true
+            if (trimmed.startsWith("ICD device=")) sawIcd = true
+            if (trimmed.contains("panvk", ignoreCase = true) || trimmed.startsWith("MESA:")) sawPanvk = true
             mismatchSum += mismatchRegex.findAll(line)
                 .sumOf { it.groupValues[1].toLongOrNull() ?: 0L }
             if (fps == null) fps = fpsRegex.find(line)?.groupValues?.get(1)
@@ -932,7 +1024,9 @@ class MainActivity : ComponentActivity() {
             last40.addLast(line)
         }
 
+        val vendorIcd = driverTypeState.value != DriverType.SYSTEM && sawIcd && !sawPanvk
         val status = when {
+            vendorIcd && !hasFail && res == "exit:0" -> "FAIL" // passed on the wrong driver: not a PanVK result
             res == "timeout" -> "TIMEOUT"
             res.startsWith("signal:") -> {
                 try {
@@ -957,7 +1051,8 @@ class MainActivity : ComponentActivity() {
             durationMs = durationMs,
             logFile = logFile,
             lastLines = last40.toList(),
-            extra = bench.takeIf { it.isNotEmpty() }?.joinToString(" | ")
+            extra = (listOfNotNull(bifrost ?: if (bifrostGpu && (status == "FAIL" || status == "SKIP")) UploadLogs.BIFROST_TAG else null, if (vendorIcd) "VENDOR ICD: test ran on the phone's own Vulkan driver, NOT PanVK (driver .so not used)" else null) + bench)
+                .takeIf { it.isNotEmpty() }?.joinToString(" | ")
         )
     }
 
@@ -973,8 +1068,9 @@ class MainActivity : ComponentActivity() {
         }
 
         // Show the card (creates the SurfaceView), wait for surfaceCreated, then let the expand animation settle.
+        withContext(Dispatchers.Main) { selectedTabState.intValue = 2 }  // Tests tab hosts the SurfaceView card
         surfaceTestState.value = "swapchain_lifecycle"
-        val surfaceWaitEnd = System.currentTimeMillis() + 5_000L
+        val surfaceWaitEnd = System.currentTimeMillis() + 20_000L
         var surface = swapSurface
         while (surface == null && System.currentTimeMillis() < surfaceWaitEnd) {
             Thread.sleep(50)
@@ -984,9 +1080,9 @@ class MainActivity : ComponentActivity() {
             surfaceTestState.value = null
             return@withContext TestResult(
                 name = "swapchain_lifecycle",
-                status = "FAIL",
+                status = "SKIP",
                 durationMs = System.currentTimeMillis() - t0,
-                lastLines = listOf("FAIL no surface")
+                lastLines = listOf("SKIP no surface: the live surface was not created in 20s (app in background, screen off or another tab open). Keep the app in front and rerun.")
             )
         }
         Thread.sleep(400)
@@ -1030,6 +1126,7 @@ class MainActivity : ComponentActivity() {
 
         val result = holder.result ?: ""
         var hasFail = false
+        var surfaceLost = false // -ENODEV: the Android surface was destroyed mid-test (app backgrounded)
         var fps: String? = null
         var resized: String? = null
         val fpsRegex = Regex("""FPS ([0-9.]+)""")
@@ -1039,6 +1136,7 @@ class MainActivity : ComponentActivity() {
         val last40 = ArrayDeque<String>(40)
         if (logFile.exists()) scanLog(logFile) { line ->
             if (line.trimStart().startsWith("FAIL")) hasFail = true
+            if (line.contains("ANativeWindow_getWidth res=-19")) surfaceLost = true
             if (fps == null) fps = fpsRegex.find(line)?.groupValues?.get(1)
             if (resized == null) resized = resizedRegex.find(line)?.groupValues?.get(1)
             phaseRegex.findAll(line).forEach {
@@ -1047,8 +1145,10 @@ class MainActivity : ComponentActivity() {
             if (last40.size == 40) last40.removeFirst()
             last40.addLast(line)
         }
-        val status = if (hangPhase == null && result == "exit:0" && !hasFail) "PASS" else "FAIL"
+        val status = if (hangPhase == null && result == "exit:0" && !hasFail) "PASS"
+            else if (surfaceLost && hangPhase == null) "SKIP" else "FAIL"
         val extra = (if (hangPhase != null) "hang in $hangPhase | " else "") +
+            (if (status == "SKIP") "SKIP surface lost mid-test (app backgrounded?) | " else "") +
             "resized FPS ${resized ?: ""} | ${phases.joinToString(", ")}"
 
         refreshLogsList()
@@ -1067,10 +1167,54 @@ class MainActivity : ComponentActivity() {
     private fun say(s: String) {
         Log.i("PanVKTest", s)
         java.io.File(filesDir, "autorun.txt").appendText(s + "\n")
+        // External files dir is readable by plain `adb pull` (no run-as, which some ROMs block).
+        try { java.io.File(getExternalFilesDir(null), "autorun.txt").appendText(s + "\n") } catch (_: Exception) {}
     }
 
-    private suspend fun runHeadlessAutorun(which: String) {
+    private fun oneLine(s: String?) = (s ?: "").replace(Regex("\\s+"), " ").trim().take(300)
+
+    private fun say0(s: String) {
         java.io.File(filesDir, "autorun.txt").delete()
+        try { java.io.File(getExternalFilesDir(null), "autorun.txt").delete() } catch (_: Exception) {}
+        say(s)
+    }
+
+    private val glPrev = JSONArray()
+
+    /** Scenario 3: one Run all per env pass (assets/env-ab.json, see EnvPasses), rc5 driver, results tagged with the pass. */
+    private suspend fun runEnvPasses(which: String) {
+        val (passes, src) = EnvPasses.load(this, intent.getStringExtra("env_ab"))
+        envPassSource = src
+        say("GAMELOOP envab passes=${passes.size} source=$src")
+        // Child-process tests get the pass env through buildEnv. The in-process swapchain_lifecycle test reads this
+        // process's env, so the pass env is set here too between passes (no test running), then the old values return.
+        val orig = HashMap<String, String?>()
+        fun restoreProcessEnv() {
+            for ((k, v) in orig) try { if (v == null) android.system.Os.unsetenv(k) else android.system.Os.setenv(k, v, true) } catch (_: Exception) {}
+        }
+        try {
+            for (p in passes) {
+                restoreProcessEnv()
+                for (e in p.env) {
+                    val k = e.substringBefore('=')
+                    if (k !in orig) orig[k] = android.system.Os.getenv(k)
+                    try { android.system.Os.setenv(k, e.substringAfter('='), true) } catch (_: Exception) {}
+                }
+                envPass = p
+                say("GAMELOOP pass=${p.index}/${p.count} name=${p.name} tests=${p.tests ?: "all"} env=${p.env.joinToString(";").ifEmpty { "(none)" }}")
+                Log.i("PanProbe", "PANPROBE_ENVPASS index=${p.index} name=${p.name} env=${p.env.joinToString(";")}")
+                runHeadlessAutorun(p.tests ?: which, final = p.index == p.count, first = p.index == 1)
+            }
+        } finally {
+            restoreProcessEnv()
+        }
+    }
+
+    private suspend fun runHeadlessAutorun(which: String, final: Boolean = true, first: Boolean = true) {
+        if (!gameLoop) {
+            java.io.File(filesDir, "autorun.txt").delete()
+            try { java.io.File(getExternalFilesDir(null), "autorun.txt").delete() } catch (_: Exception) {}
+        } else if (!first) say("GAMELOOP phase 2 driver=${driverTypeState.value.name}")
         val (json, _) = runInfo()
         val devicesArr = json?.optJSONArray("devices")
         val numDevices = devicesArr?.length() ?: 0
@@ -1080,6 +1224,8 @@ class MainActivity : ComponentActivity() {
         val numFormats = firstDev?.optJSONObject("formats")?.length() ?: 0
 
         say("INFO devices=$numDevices exts=$numExts formats=$numFormats")
+        val liveDriverInfo = oneLine(firstDev?.optJSONObject("properties")?.optString("driverInfo")).ifEmpty { "unknown" }
+        say("DRIVER slot=${driverTypeState.value.name} driverInfo=$liveDriverInfo")
         json?.optJSONObject("compliance")?.let { reports ->
             val s = complianceSummary(reports)
             for (k in s.keys()) s.getJSONObject(k).let {
@@ -1088,7 +1234,9 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        val selected = if (which == "all") testCases else testCases.filter { it.name == which }
+        // "all", one test name, or a comma-separated list of test names.
+        val wanted = which.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        val selected = if (which == "all") testCases else testCases.filter { it.name in wanted }
         val runResults = mutableListOf<TestResult>()
         for (test in selected) {
             withContext(Dispatchers.Main) {
@@ -1099,7 +1247,8 @@ class MainActivity : ComponentActivity() {
             withContext(Dispatchers.Main) {
                 updateTestResult(res)
             }
-            say("RESULT ${test.name} ${res.status} mismatch=${res.mismatch} fps=${res.fps ?: "0"} ms=${res.durationMs}${if (res.extra != null) " extra=${res.extra}" else ""}")
+            say("RESULT ${test.name} ${res.status} mismatch=${res.mismatch} fps=${res.fps ?: "0"} ms=${res.durationMs}${if (res.extra != null) " extra=${res.extra}" else ""}${envPass?.let { " pass=${it.name}" } ?: ""}")
+            Log.i("PanProbe", "PANPROBE_TEST name=${test.name} status=${res.status}${envPass?.let { " pass=${it.name}" } ?: ""} msg=${oneLine(res.lastLines.lastOrNull())}")
             if (gameLoop) {
                 if (res.status != "PASS") res.lastLines.takeLast(30).forEach { Log.i("PanProbeGameLoop", "TAIL ${test.name}: $it") }
                 writeGameLoopResult(runResults, null) // partial, survives a Test Lab timeout
@@ -1110,6 +1259,11 @@ class MainActivity : ComponentActivity() {
         val skipCount = runResults.count { it.status == "SKIP" }
         say("AUTORUN DONE pass=$passCount fail=$failCount skip=$skipCount total=${selected.size} ($passCount pass / $failCount fail / $skipCount skip)")
         val savedRun = saveRun(runResults)
+        Log.i("PanProbe", "PANPROBE_RESULT driver=$liveDriverInfo pass=$passCount fail=$failCount skip=$skipCount")
+        try {
+            if (savedRun != null) savedRun.copyRecursively(File(File(getExternalFilesDir(null), "runs"), savedRun.name), overwrite = true)
+            say("EXTERNAL READY run=${savedRun?.name}")
+        } catch (e: Exception) { say("EXTERNAL COPY FAIL $e") }
         // Only a full run uploads; a single named test never does.
         if (which == "all" && savedRun != null) autoUpload(savedRun)
         // --ez zip true: build the upload zip locally (no upload) and copy it to external files for adb pull.
@@ -1124,7 +1278,7 @@ class MainActivity : ComponentActivity() {
         }
         if (gameLoop) {
             writeGameLoopResult(runResults, savedRun)
-            withContext(Dispatchers.Main) { finish() }
+            if (final) withContext(Dispatchers.Main) { finish() }
         }
     }
 
@@ -1153,8 +1307,14 @@ class MainActivity : ComponentActivity() {
             }
         } catch (e: Exception) { out.put("error", e.toString()) }
         out.put("complete", run != null)
+        out.put("driverSlot", driverTypeState.value.name)
+        envPass?.let { out.put("envPass", EnvPasses.toJson(it, envPassSource)) }
+        if (glPrev.length() > 0) out.put("previousPhases", glPrev)
         val text = out.toString(2)
-        if (run != null) text.lines().forEach { Log.i("PanProbeGameLoop", it) }
+        if (run != null) {
+            text.lines().forEach { Log.i("PanProbeGameLoop", it) }
+            glPrev.put(JSONObject(text).apply { remove("previousPhases") })
+        }
         try {
             intent.data?.let { uri -> contentResolver.openOutputStream(uri, "wt")?.use { it.write(text.toByteArray()) } }
         } catch (e: Exception) { Log.e("PanProbeGameLoop", "write result failed", e) }
@@ -1177,6 +1337,10 @@ class MainActivity : ComponentActivity() {
         val drv = File(getDriverPath(driverTypeState.value))
         if (driverTypeState.value == DriverType.IMPORTED && !DriverUpdate.isAarch64So(drv)) {
             Toast.makeText(this, "Imported driver is not a valid aarch64 ELF .so. Re-import a real .so. Run blocked.", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (driverTypeState.value == DriverType.IMPORTED && DriverUpdate.isGlibcSo(drv)) {
+            Toast.makeText(this, DriverUpdate.GLIBC_MSG + " Run blocked.", Toast.LENGTH_LONG).show()
             return
         }
         lifecycleScope.launch(Dispatchers.Main) {
@@ -1248,6 +1412,11 @@ class MainActivity : ComponentActivity() {
                         Toast.makeText(context, "Not an aarch64 ELF .so (zip or wrong file?). Import rejected.", Toast.LENGTH_LONG).show()
                         return@rememberLauncherForActivityResult
                     }
+                    if (DriverUpdate.isGlibcSo(tmpFile)) {
+                        tmpFile.delete()
+                        Toast.makeText(context, DriverUpdate.GLIBC_MSG + " Import rejected.", Toast.LENGTH_LONG).show()
+                        return@rememberLauncherForActivityResult
+                    }
                     if (!tmpFile.renameTo(destFile)) { tmpFile.delete(); throw java.io.IOException("Could not store driver") }
                     var name = uri.lastPathSegment ?: "libimported.so"
                     context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
@@ -1304,7 +1473,7 @@ class MainActivity : ComponentActivity() {
                 note = "Download replaces the Imported .so slot."
             )
 
-            val bundledJson = remember { loadBundledDriverJson() }
+            
 
             DriverType.entries.forEach { type ->
                 val isSelected = driverTypeState.value == type
@@ -1340,24 +1509,23 @@ class MainActivity : ComponentActivity() {
                                 fontFamily = FontFamily.Monospace,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            if (type == DriverType.BUNDLED && bundledJson != null && bundledJson.length() > 0) {
-                                val name = bundledJson.optString("name").takeIf { it.isNotEmpty() }
-                                val version = bundledJson.optString("displayVersion").takeIf { it.isNotEmpty() }
-                                    ?: bundledJson.optString("packageVersion").takeIf { it.isNotEmpty() }
-                                val text = when {
-                                    name != null && version != null -> "$name  $version"
-                                    name != null -> name
-                                    version != null -> version
-                                    else -> null
+                            val meta = remember(type) { loadBundledDriverJson(type) }
+                            if (meta != null && meta.length() > 0) {
+                                val rel = meta.optJSONObject("release")
+                                val text = buildString {
+                                    append(meta.optString("name"))
+                                    meta.optString("driverInfo").takeIf { it.isNotEmpty() }?.let { append("\ndriverInfo: ").append(it) }
+                                    rel?.optString("sha256")?.takeIf { it.isNotEmpty() }?.let { append("\nsha256: ").append(it.take(16)).append("...") }
+                                    meta.optString("buildId").takeIf { it.isNotEmpty() }?.let { append("\nbuild-id: ").append(it.take(12)) }
+                                    append("\npinned release: ").append(meta.optString("displayVersion"))
+                                    if (!meta.optBoolean("matchesPin", true)) append(" (this .so differs from the pin)")
                                 }
-                                if (text != null) {
-                                    Text(
-                                        text = text,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
+                                Text(
+                                    text = text,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                             }
                         }
                     }
@@ -1438,7 +1606,12 @@ class MainActivity : ComponentActivity() {
             coroutineScope.launch {
                 infoLoadingState.value = true
                 val (json, raw) = runInfo()
-                if (json != null) {
+                val unsupported = json?.optString("notSupported")?.takeIf { it.isNotEmpty() }
+                if (unsupported != null && (json?.optJSONArray("devices")?.length() ?: 0) == 0) {
+                    infoParsedState.value = null
+                    infoRawJsonState.value = null
+                    infoRawTextState.value = unsupported + "\n\n" + raw
+                } else if (json != null) {
                     infoParsedState.value = parseVulkanInfo(json)
                     infoRawJsonState.value = json.toString(2)
                     infoRawTextState.value = null
@@ -2602,13 +2775,14 @@ private val TARGET_TAGS: Map<String, List<String>> = run {
     t(listOf(d), "gpu_prerast_slice", "clip_cull", "multi_viewport", "fill_mode", "bc_decode", "bc_perf", "pipeline_stats",
         "vertex_stores", "gs_viewport_depth", "vs_viewport_index", "large_draw", "vmr_secondary", "csf_event",
         "gs_tess_primitive_id", "dxvk_reqs", "swapchain_lifecycle")
-    t(listOf(d, s), "geometry", "tessellation", "tess_cond_state")
+    t(listOf(d, s), "geometry", "tessellation", "tess_cond_state", "tess_perf")
     t(listOf(d, v), "xfb", "depth_bounds", "blend", "occlusion_query", "descriptor_model", "shader_arith",
         "depth_stencil", "draw_params", "submit_stress")
     t(listOf(d, s, v), "robustness2", "robust_image_access2", "sampler")
     t(listOf(s), "bachata_reqs")
     t(listOf(s, v), "bachata_exec", "bachata_storage_fmtless", "bachata_dynamic_render")
     t(listOf(v), "vkd3d_reqs", "vkd3d_heap", "vkd3d_timeline")
+    t(listOf(d, v), "d3d_fl")
     m
 }
 
